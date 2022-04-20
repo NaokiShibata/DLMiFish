@@ -1,0 +1,25 @@
+Email = 'your e-mail adress'
+Api_key = 'your NCBI API key'
+
+Database1 = nucleotide
+Rettype1 = fasta
+Retmode1 = text
+Count_in_query1 = 100000
+
+Before_day = 1990/01/01
+
+## Variable for efetch
+Database2 = nucleotide # Select the database to use.
+Rettype2 = gb
+Retmode2 = text
+Query_per_Chunk2 = 50
+
+## Variable for Option
+option = Yes #'Yes' or 'No'
+
+## cutadapat option
+error = 0.1 # Maximum allowed error rate as value between 0 and 1 (no. of errors divided by length of matching region). Default: 0.1 (=10%)
+cores = 24 # Number of using cores
+
+## Seqkit option
+minlength = 120 # Minimum length using MiFish Database. MiFish amplicon average length is 172bp, Min ca.140bp
