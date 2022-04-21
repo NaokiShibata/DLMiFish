@@ -1,5 +1,6 @@
 # DLMiFish
-NCBIから真骨類 (Teleostei, taxid=[32443](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=32443&lvl=3&lin=f&keep=1&srchmode=1&unlock))、軟骨魚類 (Chondrichthyes, taxid=[7777](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=7777&lvl=3&lin=f&keep=1&srchmode=1&unlock))、円口類(Cyclostomata, taxid=[1476529](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=1476529&lvl=3&lin=f&keep=1&srchmode=1&unlock))の12s rRNA領域の配列データをダウンロードするパッケージです。`Biopython`に搭載されている`Entrez`の各関数を使って、上記3分類群の配列を取得した後、Genbankの情報をもとに自動で12s rRNA領域を切り出し抽出しています。また、Option機能では、`Cutadapt`によるプライマー配列の一部削除(データ軽量化のため)と`seqkit`による配列データの配列長を視覚化したりもできます。
+NCBIから真骨類 (Teleostei, taxid=[32443](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=32443&lvl=3&lin=f&keep=1&srchmode=1&unlock))、軟骨魚類 (Chondrichthyes, taxid=[7777](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=7777&lvl=3&lin=f&keep=1&srchmode=1&unlock))、円口類(Cyclostomata, taxid=[1476529](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=1476529&lvl=3&lin=f&keep=1&srchmode=1&unlock))の12s rRNA領域の配列データをダウンロードするパッケージです。
+`Biopython`に搭載されている`Entrez`の各関数を使って、上記3分類群の配列を取得した後、Genbankの情報をもとに自動で12s rRNA領域を切り出し抽出しています。また、Option機能では、`Cutadapt`によるプライマー配列の一部削除(データ軽量化のため)と`seqkit`による配列データの配列長を視覚化したりもできます。
 
 windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
 
@@ -11,6 +12,16 @@ windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
   - tqdm : 最新版 or pythonのバージョンにあったもの
 
 - conda : 最新版 or pythonのバージョンにあったもの
+- [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
+- seqkit version2.0以上
+
+## 01 仮想環境の作成
+pythonでは、メイン環境とは他に仮想的な実行環境を作成できます。  
+目的は以下の通り、
+- システム全体で使うpython環境に影響を与えずモジュールの追加や入れかをしたい。
+- 異なるversionのpythonを使い分けたりしたい。
+ここでは、`Conda`で仮想環境を作成する方法を紹介します。
+
 
 - [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
   ### Installing based on conda
@@ -61,8 +72,12 @@ windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
 git clone https://github.com/NaokiShibata/DLMiFish.git
 ```
 ### Download ZIP
-Download ZIPボタンよりダウンロード
+Download ZIPボタンよりダウンロードすると`ZIP`ファイルがダウンロードされるので、デスクトップに置く。 & 解凍する
 ![image](https://user-images.githubusercontent.com/53568847/164349138-3227f1cd-3e16-45c8-a3e7-4868dfeb303c.png)
+
+解凍したら、DLMiFish-masterをDLMiFishに変更する。
+
+
 
   
   
