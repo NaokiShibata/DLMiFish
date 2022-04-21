@@ -1,81 +1,125 @@
 # DLMiFish
-NCBIから真骨類 (Teleostei, taxid=[32443](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=32443&lvl=3&lin=f&keep=1&srchmode=1&unlock))、軟骨魚類 (Chondrichthyes, taxid=[7777](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=7777&lvl=3&lin=f&keep=1&srchmode=1&unlock))、円口類(Cyclostomata, taxid=[1476529](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=1476529&lvl=3&lin=f&keep=1&srchmode=1&unlock))の12s rRNA領域の配列データをダウンロードするパッケージです。
-`Biopython`に搭載されている`Entrez`の各関数を使って、上記3分類群の配列を取得した後、Genbankの情報をもとに自動で12s rRNA領域を切り出し抽出しています。また、Option機能では、`Cutadapt`によるプライマー配列の一部削除(データ軽量化のため)と`seqkit`による配列データの配列長を視覚化したりもできます。
+NCBIから真骨類 (Teleostei, taxid=[32443](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=32443&lvl=3&lin=f&keep=1&srchmode=1&unlock))、軟骨魚類 (Chondrichthyes, taxid=[7777](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=7777&lvl=3&lin=f&keep=1&srchmode=1&unlock))、円口類(Cyclostomata, taxid=[1476529](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=1476529&lvl=3&lin=f&keep=1&srchmode=1&unlock))の12s rRNA領域の配列データをダウンロードするパッケージです。  
+`Biopython`に搭載されている`Entrez`の各関数を使って、上記3分類群のGenbankの情報を取得した後に12s rRNA領域の配列情報を抽出します。また、Optionでは、`Cutadapt`を使ってプライマー配列の一部削除(データ軽量化)や`seqkit`による配列データの配列長を視覚化もできたりします。  
 
-windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
+windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。  
 
 ## 動作環境や環境整備に必要なもの(抜けが確認出来れば随時更新します)
 
-- python3.6 以上 (f string使用のため)
-  - pandas : 最新版 or pythonのバージョンにあったもの
-  - biopython : 最新版 or pythonのバージョンにあったもの
-  - tqdm : 最新版 or pythonのバージョンにあったもの
-
+- python3.6 以上 (f string使用のため)  
+以下は最新版 or pythonのバージョンにあったもの  
+  - pandas
+  - biopython
+  - tqdm
 - conda : 最新版 or pythonのバージョンにあったもの
 - [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
-- seqkit version2.0以上
+- seqkit : version2.0以上
 
 ## 01 仮想環境の作成
 pythonでは、メイン環境とは他に仮想的な実行環境を作成できます。  
-目的は以下の通り、
-- システム全体で使うpython環境に影響を与えずモジュールの追加や入れかをしたい。
-- 異なるversionのpythonを使い分けたりしたい。
-ここでは、`Conda`で仮想環境を作成する方法を紹介します。
 
+主な目的は以下の通り
+- システム全体で使うpython環境に影響を与えずモジュールの追加や入れ替えをしたい
+- 異なるversionのpythonを使い分けたりしたい
+- 失敗した場合に、簡単に削除できる  
 
-- [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
+pythonの仮想環境はPython3 の標準ライブラリである`venv`や`virtualenv`などがあります。  
+以下のブログ記事にてminicondaをベースとした`Conda`での仮想環境を作成する方法を紹介していますのでご参照ください。  
+- [pythonの環境構築とその他もろもろについての覚え書き](https://edna-blog.com/technique/python_env/) ＠はじめての環境DNA  
+
+## 02モジュールをインストールする
+まず、パッケージマネージャーである`mamba`をインストールします。mambaはマルチスレッドでリポジトリのデータやパッケージファイルを並列ダウンロードしたり、依存関係を管理してくれたりします。
+
+- [mamba](https://github.com/mamba-org/mamba) : Github repository  
+
   ### Installing based on conda
   ```bash
   conda install mamba -n base -c conda-forge
   ```
-- seqkit version2.0以上
+その他、pythonモジュールのインストール
+- [biopython](https://github.com/biopython/biopython) : Github repository  
+- [pandas](https://github.com/pandas-dev/pandas) : Github repository  
+- [tqdm](https://github.com/tqdm/tqdm) : Github repository  
+
   ### Install
-  Windows 10でcondaを使わない場合
+  ```bash
+  mamba install bipython -y
+  mamba install -c anaconda pandas -y
+  mamba install -c conda-forge tqdm -y
+  ```
+次に、fastqやfastaの操作ツールである`seqkit`をインストールします。 
+
+- [seqkit](https://github.com/shenwei356/seqkit) : Github repository  
+  ### Install
+  __Windows 10でcondaを使わない場合__
+  
   1. Homeデレクトリに移動
   ```bash
   cd
   ```
+  
   2. 最新版をダウンロード(要version確認)
   ```bash
   # 2022/4/21
   wget https://github.com/shenwei356/seqkit/releases/download/v2.2.0/seqkit_linux_arm64.tar.gz
   ```
+  
   3. 解凍
   ```
   tar -zxvf *arm64.tar.gz
   ```
+  
   4. プログラムの置き場に移動
   ```
   sudo mv seqkit ~/usr/local/bin/
   ```
   
-  `conda`が使える方は以下で一発
+  __`conda`が使える方は以下で一発インストール__
   ```bash
   conda install -c bioconda seqkit -y
   ```
   
-  `mamba`でもよい(むしろパッケージ管理にはこちらがおすすめ
+  __`mamba`でもよい__
+  ```bash
   mamba install -c bioconda seqkit -y
-
+  ```
+  
   5. 確認
   ```bash
   seqkit version
   # seqkit v2.0.0
   ```
   
-## Downlaod DLMiFish
+## 03 DLMiFishのダウンロード
 デスクトップに配置することを想定
 
-### use git
+### using git
 `git clone`を使用したパッケージ取得。デスクトップをカレントデレクトリとした後に以下を実行
 ```bash
 git clone https://github.com/NaokiShibata/DLMiFish.git
 ```
 ### Download ZIP
-Download ZIPボタンよりダウンロードすると`ZIP`ファイルがダウンロードされるので、デスクトップに置く。 & 解凍する
+Download ZIPボタンよりダウンロードすると`ZIP`ファイルがダウンロードされるので、デスクトップに置き、解凍します。
 ![image](https://user-images.githubusercontent.com/53568847/164349138-3227f1cd-3e16-45c8-a3e7-4868dfeb303c.png)
 
-解凍したら、DLMiFish-masterをDLMiFishに変更する。
+解凍したら、DLMiFish-masterをDLMiFishに変更します。
+
+## 04 使い方
+### クイックスタート
+`setting.txt`にご自身の情報を追加して、`python3 DLMiFish.py`を実行すると、配列取得が開始されるはずです。
+
+__APIs__  
+NCBIのAPI keyを取得してください。Entrezの使用上は任意ですが、利用頻度が高い場合(3回/1秒以上)には必要になります。プログラムの作成上無しで動く設計にできていません。
+
+- [NCBI account](https://www.ncbi.nlm.nih.gov/account/)
+
+アカウント登録とAPIの取得ができましたら、`seatting.txt`の下記部分に必要事項を記載します。
+- `Email = e-mail adress` : 有効なe-mailアドレスを指定
+- `Api_key =  API` : 取得したAPIを指定
+
+
+
+
 
 
 
