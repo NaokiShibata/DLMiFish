@@ -1,10 +1,11 @@
-# DLMiFish
+# DLMiFish (Beta version)
 NCBIから真骨類 (Teleostei, taxid=[32443](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=32443&lvl=3&lin=f&keep=1&srchmode=1&unlock))、軟骨魚類 (Chondrichthyes, taxid=[7777](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=7777&lvl=3&lin=f&keep=1&srchmode=1&unlock))、円口類(Cyclostomata, taxid=[1476529](https://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?mode=Info&id=1476529&lvl=3&lin=f&keep=1&srchmode=1&unlock))の12s rRNA領域の配列データをダウンロードするパッケージです。  
 `Biopython`に搭載されている`Entrez`の各関数を使って、上記3分類群のGenbankの情報を取得した後に12s rRNA領域の配列情報を抽出します。また、Optionでは、`Cutadapt`を使ってプライマー配列の一部削除(データ軽量化)や`seqkit`による配列データの配列長を視覚化もできたりします。  
+1度ダウンロードした.gbファイルはGI_Folderに保存されます。ダウンロードする.gbファイルはNCBIでの問い合わせによって得られたACCの情報と、これまでにダウンロードした.gbファイル名に使用されているACCの情報を比較し、今回とこれまでの差分をとることでダウンロードする.gbファイルを決めています。
 
 windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。  
 
-## 動作環境や環境整備に必要なもの(抜けが確認出来れば随時更新します)
+## 動作環境や環境整備に必要なもの
 
 - python3.6 以上 (f string使用のため)  
 以下は最新版 or pythonのバージョンにあったもの  
@@ -24,7 +25,7 @@ pythonでは、メイン環境とは他に仮想的な実行環境を作成で�
 - 失敗した場合に、簡単に削除できる  
 
 pythonの仮想環境はPython3 の標準ライブラリである`venv`や`virtualenv`などがあります。  
-以下のブログ記事にてminicondaをベースとした`Conda`での仮想環境を作成する方法を紹介していますのでご参照ください。  
+minicondaをベースとした`Conda`での仮想環境作成法は以下のブログ記事にて紹介していますのでご参照ください。  
 - [pythonの環境構築とその他もろもろについての覚え書き](https://edna-blog.com/technique/python_env/) ＠はじめての環境DNA  
 
 ## 02モジュールをインストールする
@@ -102,26 +103,19 @@ git clone https://github.com/NaokiShibata/DLMiFish.git
 Download ZIPボタンよりダウンロードすると`ZIP`ファイルがダウンロードされるので、デスクトップに置き、解凍します。
 ![image](https://user-images.githubusercontent.com/53568847/164349138-3227f1cd-3e16-45c8-a3e7-4868dfeb303c.png)
 
-解凍したら、DLMiFish-masterをDLMiFishに変更します。
+解凍したら、DLMiFish-masterというフォルダ名をDLMiFishに変更します。
 
 ## 04 使い方
 ### クイックスタート
-`setting.txt`にご自身の情報を追加して、`python3 DLMiFish.py`を実行すると、配列取得が開始されるはずです。
+`setting.txt`に以下の情報を追加して、`python3 DLMiFish.py`を実行すると、配列取得が開始されるはずです。  
+注意点として、現状では1GB程度のファイルサイズになることと、環境にもよりますが、デフォルトの設定では3時間程度かかります(2022/4現在のデータ量)。
 
 __APIs__  
-NCBIのAPI keyを取得してください。Entrezの使用上は任意ですが、利用頻度が高い場合(3回/1秒以上)には必要になります。プログラムの作成上無しで動く設計にできていません。
+NCBIのAPI keyを取得してください。Entrezの使用上は任意ですが、プログラムの作成上表記無しで動く設計にできていません。  
+また、利用頻度が高い場合(3回/1秒以上)には必要になるので登録&取得しておきましょう。  
 
 - [NCBI account](https://www.ncbi.nlm.nih.gov/account/)
 
 アカウント登録とAPIの取得ができましたら、`seatting.txt`の下記部分に必要事項を記載します。
 - `Email = e-mail adress` : 有効なe-mailアドレスを指定
 - `Api_key =  API` : 取得したAPIを指定
-
-
-
-
-
-
-
-  
-  
