@@ -84,7 +84,7 @@ if __name__ == '__main__':
         # basket to product var
         product_var = []
 
-        for record in SeqIO.parse(f'./GI_Folder/{gi_filepath[i]}', 'genbank'):
+        for record in SeqIO.parse(f'./GI_Folder/{gi_filepath[gilist]}', 'genbank'):
 
             # basket to collect rRNA slices
             rRNA_records = []
