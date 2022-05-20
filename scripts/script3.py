@@ -9,6 +9,7 @@ from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from tqdm import tqdm
 import pathlib
+import joblib
 
 
 # Function define
@@ -78,14 +79,12 @@ if __name__ == '__main__':
     dt_start = datetime.now()
 
     gi_filepath = os.listdir('./GI_Folder')
+    
+    def gen_fa(gilist):
+        # basket to product var
+        product_var = []
 
-    # basket to product var
-    product_var = []
-
-    for i in tqdm(range(0, len(gi_filepath)), desc=Color.CYAN + 'Progress rate'+ Color.END):
-        gil = f'./GI_Folder/{gi_filepath[i]}'
-
-        for record in SeqIO.parse(gil, 'genbank'):
+        for record in SeqIO.parse(f'./GI_Folder/{gi_filepath[i]}', 'genbank'):
 
             # basket to collect rRNA slices
             rRNA_records = []
@@ -158,9 +157,12 @@ if __name__ == '__main__':
                         else:
                             ofa.write('NO rRNA ANNOTATION FOUND')
 
-    # make product list
-    with open('./Results/product_list.tsv', mode = 'a') as prod:
-        prod.write('\n'.join(map(str,set(product_var))) + '\n')
+            # make product list
+            with open('./Results/product_list.tsv', mode = 'a') as prod:
+                prod.write('\n'.join(map(str,set(product_var))) + '\n')
+
+    # parallel run
+    joblib.Parallel(n_jobs=-1)(joblib.delayed(gen_fa)(gilist) for gilist in range(0, len(gi_filepath)))
 
     # remove duplicate spcies list    
     with open('./Results/MiFishSeq_temp_dlsplist.txt', mode = 'r') as spltemp2:
