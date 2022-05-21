@@ -7,10 +7,12 @@ import sys
 from Bio import Entrez
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import pathlib
 import joblib
-
+from joblib import delayed
+import contextlib
+from typing import Optional
 
 # Function define
 def timestamp():
@@ -40,6 +42,26 @@ if not os.path.exists('./Results/fasta'):
     pathlib.Path('./Results/fasta').mkdir(exist_ok=True)
 else:
     pass
+
+# define progress bar function
+@contextlib.contextmanager
+def tqdm_joblib(total: Optional[int] = None, **kwargs):
+
+    pbar = tqdm(total=total, miniters=1, smoothing=0, **kwargs)
+
+    class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
+        def __call__(self, *args, **kwargs):
+            pbar.update(n=self.batch_size)
+            return super().__call__(*args, **kwargs)
+
+    old_batch_callback = joblib.parallel.BatchCompletionCallBack
+    joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
+
+    try:
+        yield pbar
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old_batch_callback
+        pbar.close()
 
 # Open setting text file
 with open('setting.txt', encoding = 'shift-jis') as st:
@@ -80,6 +102,7 @@ if __name__ == '__main__':
 
     gi_filepath = os.listdir('./GI_Folder')
     
+    @delayed
     def gen_fa(gilist):
         # basket to product var
         product_var = []
@@ -162,7 +185,8 @@ if __name__ == '__main__':
                 prod.write('\n'.join(map(str,set(product_var))) + '\n')
 
     # parallel run
-    joblib.Parallel(n_jobs=-1)(joblib.delayed(gen_fa)(gilist) for gilist in range(0, len(gi_filepath)))
+    with tqdm_joblib(len(gi_filepath):
+                     joblib.Parallel(n_jobs=-1)(gen_fa(gilist) for gilist in range(len(gi_filepath)))
 
     # remove duplicate spcies list    
     with open('./Results/MiFishSeq_temp_dlsplist.txt', mode = 'r') as spltemp2:
