@@ -185,7 +185,7 @@ if __name__ == '__main__':
                 prod.write('\n'.join(map(str,set(product_var))) + '\n')
 
     # parallel run
-    with tqdm_joblib(len(gi_filepath):
+    with tqdm_joblib(len(gi_filepath)):
                      joblib.Parallel(n_jobs=-1)(gen_fa(gilist) for gilist in range(len(gi_filepath)))
 
     # remove duplicate spcies list    
