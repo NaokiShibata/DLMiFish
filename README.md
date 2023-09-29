@@ -13,6 +13,7 @@ windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
   - biopython
   - tqdm
   - joblib
+  - cutadapt
 - conda : 最新版 or pythonのバージョンにあったもの
 - [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
 - seqkit : version2.0以上
@@ -45,7 +46,7 @@ minicondaをベースとした`Conda`での仮想環境作成法は以下のブ�
 
   ### Install
   ```bash
-  mamba install bipython -y
+  mamba install bioconda bipython cutadapt -y
   mamba install -c anaconda pandas -y
   mamba install -c conda-forge tqdm joblib -y
   ```
