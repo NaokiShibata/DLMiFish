@@ -1,13 +1,16 @@
 # -*- coding:utf-8 -*-
 
-import pandas as pd
+import os
+import pathlib
 import re
 import sys
-import os
 import time
-import pathlib
 from datetime import datetime
+from pathlib import Path
 from time import sleep
+
+import pandas as pd
+import typer
 from Bio import Entrez
 from Bio import SeqIO
 
@@ -130,7 +133,7 @@ def main():
 
     # write log header
     log_lines = [
-        '# processed by: ' + sys.argv[0],
+        '# processed by: ' + Path(__file__).name,
         '# process started: ' + timestamp(),
         '# accession id file: ' + acc_id_file_path,
         '# db=' + db,
@@ -145,6 +148,9 @@ def main():
     acc_chunks, total_id_count = get_acc_chunks(acc_id_file_path, count_in_query)
     print(f" --- total_id_count : {total_id_count} seqs.")
     print()
+    if total_id_count == 0:
+        print(' --- No accession IDs found. Nothing to do.')
+        return
 
     # some buckets to monitor the processes
     chunk_num = 0
@@ -217,38 +223,42 @@ def main():
         '# total elapsed time; ' + et]
     write_file(log_file, 'a', '\n'.join(log_lines))
 
-if __name__ == '__main__':
-    # get accession id file path
-    acc_id_file_path = './ID/ID.txt'
+# get accession id file path
+acc_id_file_path = './ID/ID.txt'
 
-    # vars for efetch
-    # 'nucleotide' will work as well
-    db = re.search(r'Database2\s*=\s*(\S+)', txt).group(1)
-    
-    # use 'fasta', 'gbwithparts', for fasta, GenBank(full)
-    rettype = re.search(r'Rettype2\s*=\s*(\S+)', txt).group(1)
-    retmode = re.search(r'Retmode2\s*=\s*(\S+)', txt).group(1)
-    
-    # count in one query for NCBI
-    count_in_query = re.search(r'Query_per_Chunk2\s*=\s*(\S+)', txt).group(1)  
+# vars for efetch
+# 'nucleotide' will work as well
+db = re.search(r'Database2\s*=\s*(\S+)', txt).group(1)
 
-    # vars for SeqIO
-    # format name adjustment and file extension
-    if rettype in ['gb', 'gbwithparts']:
-        fmt = 'gb'
-        ext = '.gb'
-    elif rettype == 'fasta':
-        fmt = 'fasta'
-        ext = '.fa'
-    else:
-        print("rettype shold be 'gb', 'gbwithparts', or 'fasta'")
-        sys.exit(1)
+# use 'fasta', 'gbwithparts', for fasta, GenBank(full)
+rettype = re.search(r'Rettype2\s*=\s*(\S+)', txt).group(1)
+retmode = re.search(r'Retmode2\s*=\s*(\S+)', txt).group(1)
 
-    # log file path construction
-    acc_id_file_stem = os.path.splitext(os.path.basename(acc_id_file_path))[0]
-    # Make file name
-    runday = sys.argv[1]
+# count in one query for NCBI
+count_in_query = re.search(r'Query_per_Chunk2\s*=\s*(\S+)', txt).group(1)
+
+# vars for SeqIO
+# format name adjustment and file extension
+if rettype in ['gb', 'gbwithparts']:
+    fmt = 'gb'
+    ext = '.gb'
+elif rettype == 'fasta':
+    fmt = 'fasta'
+    ext = '.fa'
+else:
+    print("rettype shold be 'gb', 'gbwithparts', or 'fasta'")
+    sys.exit(1)
+
+# log file path construction
+acc_id_file_stem = os.path.splitext(os.path.basename(acc_id_file_path))[0]
+
+def run(
+    runday: str = typer.Argument(..., help="Run date string (e.g. 20240201) used for log file naming."),
+):
+    """Download GenBank records for accession IDs in ID/ID.txt."""
+    global log_file
     log_file = './Results/' + f'{runday}' + "_" + acc_id_file_stem + '_download_log.txt'
-
-    # run !
     main()
+
+if __name__ == '__main__':
+    typer.run(run)
