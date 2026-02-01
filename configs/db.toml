@@ -1,0 +1,41 @@
+[ncbi]
+# Provide either in config or via env vars NCBI_EMAIL / NCBI_API_KEY.
+email = "your.email@example.com"
+api_key = "YOUR_API_KEY"
+
+db = "nucleotide"
+rettype = "gb"
+retmode = "text"
+per_query = 100
+use_history = true
+# delay_sec overrides default rate-limit delay.
+# delay_sec = 0.34
+
+# Marker definitions are loaded from an external file.
+markers_file = "configs/markers_mitogenome.toml"
+
+# Output header format
+[output]
+default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
+
+[output.header_formats]
+simple = "{acc_id}|{marker}|{loc}"
+verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
+mifish_pipeline = "gb|{acc_id}|{organism}"
+
+# Taxon options
+[taxon]
+# If true, do not expand descendants in taxon search.
+noexp = false
+
+# Optional filters. If unset, no filtering is applied.
+[filters]
+organelle = "mitochondrion"
+# length_min = 120
+# length_max = 30000
+# source = "ddbj_embl_genbank"
+# date_from = "1990/01/01"
+# date_to = "2025/12/31"
+# include_keywords = ["12S"]
+# exclude_keywords = ["WGS"]
+# extra = "complete[prop]"

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Virtual env / uv
+.venv/
+.env
+.env.*
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Local testing
+test/
+
+# Outputs
+Results/*
+!Results/.gitkeep
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
