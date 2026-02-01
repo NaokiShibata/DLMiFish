@@ -234,25 +234,58 @@ def load_config(path: Path) -> Dict:
     with path.open("rb") as f:
         data = tomllib.load(f)
 
-    markers_file = data.get("markers_file")
+    if "markers_file" in data:
+        raise typer.BadParameter("markers_file must be defined under [markers].file (top-level is not supported).")
+
+    markers_file = None
+    markers_section = data.get("markers")
+    if isinstance(markers_section, dict):
+        if "markers_file" in markers_section:
+            raise typer.BadParameter("Use [markers].file instead of [markers].markers_file.")
+        if "file" in markers_section:
+            markers_file = markers_section.get("file")
+            if not isinstance(markers_file, str):
+                raise typer.BadParameter("markers.file must be a string path.")
+
+    inline_markers: Dict[str, Dict] = {}
+    if markers_section is None:
+        markers_section = {}
+    if not isinstance(markers_section, dict):
+        raise typer.BadParameter("[markers] must be a table (dict).")
+    for key, value in markers_section.items():
+        if key in ("file", "markers_file"):
+            continue
+        if not isinstance(value, dict):
+            raise typer.BadParameter(f"markers.{key} must be a table (dict).")
+        inline_markers[key] = value
+
+    markers_from_file: Dict[str, Dict] = {}
     if markers_file:
         if not isinstance(markers_file, str):
             raise typer.BadParameter("markers_file must be a string path.")
-        markers_path = Path(markers_file)
-        if not markers_path.is_absolute():
-            markers_path = path.parent / markers_path
-        if not markers_path.exists():
-            raise typer.BadParameter(f"Markers file not found: {markers_path}")
+        markers_path = Path(os.path.expandvars(os.path.expanduser(markers_file)))
+        candidates: List[Path] = []
+        if markers_path.is_absolute():
+            candidates.append(markers_path)
+        else:
+            candidates.append(path.parent / markers_path)
+            candidates.append(Path.cwd() / markers_path)
+            candidates.append(Path(__file__).resolve().parent / markers_path)
+
+        markers_path = next((p for p in candidates if p.exists()), None)
+        if not markers_path:
+            tried = ", ".join(str(p) for p in candidates)
+            raise typer.BadParameter(f"Markers file not found. Tried: {tried}")
         with markers_path.open("rb") as f:
             markers_data = tomllib.load(f)
         markers_from_file = markers_data.get("markers")
         if not isinstance(markers_from_file, dict) or not markers_from_file:
             raise typer.BadParameter("Markers file must define a non-empty [markers] section.")
-        data.setdefault("markers", {})
-        if not isinstance(data["markers"], dict):
-            raise typer.BadParameter("[markers] must be a table (dict).")
-        merged = dict(markers_from_file)
-        merged.update(data["markers"])
+
+    merged = {}
+    merged.update(markers_from_file)
+    merged.update(inline_markers)
+    if merged:
         data["markers"] = merged
 
     if "ncbi" not in data:
@@ -661,6 +694,28 @@ def build_output_path(
 def write_log(log_path: Path, lines: List[str]) -> None:
     with log_path.open("w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+
+
+@app.command("list-markers")
+def list_markers(
+    config: Path = typer.Option(..., "--config", "-c", help="Path to TOML config file."),
+) -> None:
+    """
+    List marker IDs and aliases from the config (including markers_file).
+    """
+    cfg = load_config(config)
+    markers = cfg.get("markers", {})
+    table = Table(title="Markers", show_header=True, header_style="bold")
+    table.add_column("Marker ID")
+    table.add_column("Aliases")
+    table.add_column("Header Format")
+    for key in sorted(markers.keys()):
+        entry = markers[key] or {}
+        aliases = entry.get("aliases") or []
+        header_format = entry.get("header_format") or ""
+        aliases_text = ", ".join(aliases) if aliases else "-"
+        table.add_row(str(key), aliases_text, str(header_format) or "-")
+    console.print(table)
 
 
 @app.command()
