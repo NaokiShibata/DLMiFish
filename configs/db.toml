@@ -4,26 +4,29 @@ email = "your.email@example.com"
 api_key = "YOUR_API_KEY"
 
 db = "nucleotide"
-rettype = "fasta"
+rettype = "gb"
 retmode = "text"
 per_query = 100
 use_history = true
 # delay_sec overrides default rate-limit delay.
 # delay_sec = 0.34
 
+# Marker definitions are loaded from an external file.
+markers_file = "configs/markers_mitogenome.toml"
+
+# Output header format
+[output]
+default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
+
+[output.header_formats]
+simple = "{acc_id}|{marker}|{loc}"
+verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
+mifish_pipeline = "gb|{acc_id}|{organism}"
+
 # Taxon options
 [taxon]
 # If true, do not expand descendants in taxon search.
 noexp = false
-
-# Marker definitions (keys are marker IDs)
-[markers."12s"]
-aliases = ["12", "12s"]
-phrases = ["12S", "rrnS", "small subunit ribosomal RNA"]
-
-[markers."coi"]
-aliases = ["coi", "co1"]
-phrases = ["COI", "CO1", "cytochrome c oxidase subunit I"]
 
 # Optional filters. If unset, no filtering is applied.
 [filters]

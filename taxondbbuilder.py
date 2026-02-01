@@ -6,11 +6,24 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from queue import Queue
+from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import typer
 from Bio import Entrez
 from Bio import SeqIO
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
 
 try:
     import tomllib
@@ -21,6 +34,180 @@ app = typer.Typer(
     add_completion=False,
     help="TaxonDBBuilder - build a generic NCBI FASTA database by taxon and marker.",
 )
+console = Console()
+
+DEFAULT_FEATURE_TYPES = ["rRNA", "gene", "CDS"]
+DEFAULT_FEATURE_FIELDS = ["gene", "product", "note", "standard_name"]
+DEFAULT_HEADER_FORMAT = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
+
+
+def print_header() -> None:
+    console.print(
+        Panel(
+            "Generic NCBI GenBank fetch + feature extraction",
+            title="TaxonDBBuilder",
+            subtitle="DB FASTA builder",
+            expand=False,
+        )
+    )
+
+
+def render_run_table(
+    config: Path,
+    taxids: List[str],
+    markers: List[str],
+    out_path: Path,
+    filters_cfg: Dict,
+) -> None:
+    table = Table(title="Run Summary", show_header=True, header_style="bold")
+    table.add_column("Item")
+    table.add_column("Value", overflow="fold")
+    table.add_row("Config", str(config))
+    table.add_row("Taxids", ", ".join(taxids))
+    table.add_row("Markers", ", ".join(markers))
+    table.add_row("Output", str(out_path))
+    if filters_cfg:
+        table.add_row("Filters", ", ".join(sorted(filters_cfg.keys())))
+    else:
+        table.add_row("Filters", "none")
+    console.print(table)
+
+
+def render_result_table(
+    total_records: int,
+    matched_records: int,
+    matched_features: int,
+    kept_records: int,
+    skipped_same: int,
+    duplicated_diff: int,
+    out_path: Path,
+    log_path: Path,
+) -> None:
+    table = Table(title="Result Summary", show_header=True, header_style="bold")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("Total records", str(total_records))
+    table.add_row("Matched records", str(matched_records))
+    table.add_row("Matched features", str(matched_features))
+    table.add_row("Kept records", str(kept_records))
+    table.add_row("Skipped duplicates (same acc+seq)", str(skipped_same))
+    table.add_row("Kept duplicates (same acc, diff seq)", str(duplicated_diff))
+    table.add_row("Output", str(out_path))
+    table.add_row("Log", str(log_path))
+    console.print(table)
+
+
+def process_genbank_chunk(
+    chunk: str,
+    marker_rules: List[Dict],
+    acc_to_seqs: Dict[str, set],
+    out_f,
+    counters: Dict[str, int],
+    dup_accessions: Dict[str, int],
+    lock: Lock,
+    progress: Progress,
+    task_id: int,
+) -> None:
+    handle = io.StringIO(chunk)
+    for record in SeqIO.parse(handle, "genbank"):
+        with lock:
+            counters["total_records"] += 1
+        progress.update(task_id, advance=1)
+
+        if not record.seq:
+            continue
+
+        acc = record.id
+        organism = record.annotations.get("organism", "unknown")
+        organism_safe = sanitize_header(str(organism))
+        record_matched = False
+
+        for feature in record.features:
+            matched_label = None
+            matched_marker = None
+            matched_type = feature.type
+
+            header_format = None
+            for rule in marker_rules:
+                if rule["feature_types"] and feature.type not in rule["feature_types"]:
+                    continue
+                matched_label = match_feature(
+                    feature,
+                    rule["patterns"],
+                    rule["feature_fields"],
+                )
+                if matched_label:
+                    matched_marker = rule["key"]
+                    header_format = rule["header_format"]
+                    break
+
+            if not matched_label or not feature.location:
+                continue
+
+            try:
+                seq = str(feature.extract(record.seq)).upper()
+            except Exception:
+                continue
+
+            if not seq:
+                continue
+
+            start = int(feature.location.start) + 1
+            end = int(feature.location.end)
+            strand = feature.location.strand or 0
+
+            label_safe = sanitize_header(str(matched_label))
+            marker_safe = sanitize_header(str(matched_marker or "marker"))
+            type_safe = sanitize_header(str(matched_type))
+            loc = f"{start}-{end}"
+
+            with lock:
+                counters["matched_features"] += 1
+                record_matched = True
+
+                seqs = acc_to_seqs.setdefault(acc, set())
+                if seq in seqs:
+                    counters["skipped_same"] += 1
+                    continue
+
+                dup_index = None
+                if seqs:
+                    dup_index = len(seqs) + 1
+                    counters["duplicated_diff"] += 1
+                    dup_accessions[acc] = dup_accessions.get(acc, 1) + 1
+
+                seqs.add(seq)
+
+                acc_id = f"{acc}_dup{dup_index}" if dup_index else acc
+                dup_tag = f"dup{dup_index}" if dup_index else ""
+                header_values = {
+                    "acc": acc,
+                    "acc_id": acc_id,
+                    "organism": organism_safe,
+                    "organism_raw": str(organism),
+                    "marker": marker_safe,
+                    "marker_raw": str(matched_marker or ""),
+                    "label": label_safe,
+                    "label_raw": str(matched_label),
+                    "type": type_safe,
+                    "type_raw": str(matched_type),
+                    "start": str(start),
+                    "end": str(end),
+                    "loc": loc,
+                    "strand": str(strand),
+                    "dup": dup_tag,
+                }
+                header = build_header(header_format or DEFAULT_HEADER_FORMAT, header_values).strip()
+                if not header:
+                    header = acc_id
+
+                out_f.write(f">{header}\n")
+                out_f.write(f"{seq}\n")
+                counters["kept_records"] += 1
+
+        if record_matched:
+            with lock:
+                counters["matched_records"] += 1
 
 
 def load_config(path: Path) -> Dict:
@@ -28,6 +215,27 @@ def load_config(path: Path) -> Dict:
         raise typer.BadParameter(f"Config file not found: {path}")
     with path.open("rb") as f:
         data = tomllib.load(f)
+
+    markers_file = data.get("markers_file")
+    if markers_file:
+        if not isinstance(markers_file, str):
+            raise typer.BadParameter("markers_file must be a string path.")
+        markers_path = Path(markers_file)
+        if not markers_path.is_absolute():
+            markers_path = path.parent / markers_path
+        if not markers_path.exists():
+            raise typer.BadParameter(f"Markers file not found: {markers_path}")
+        with markers_path.open("rb") as f:
+            markers_data = tomllib.load(f)
+        markers_from_file = markers_data.get("markers")
+        if not isinstance(markers_from_file, dict) or not markers_from_file:
+            raise typer.BadParameter("Markers file must define a non-empty [markers] section.")
+        data.setdefault("markers", {})
+        if not isinstance(data["markers"], dict):
+            raise typer.BadParameter("[markers] must be a table (dict).")
+        merged = dict(markers_from_file)
+        merged.update(data["markers"])
+        data["markers"] = merged
 
     if "ncbi" not in data:
         raise typer.BadParameter("Missing [ncbi] section in config.")
@@ -42,7 +250,7 @@ def setup_entrez(ncbi_cfg: Dict) -> None:
     api_key = ncbi_cfg.get("api_key") or os.environ.get("NCBI_API_KEY")
 
     if not email:
-        typer.echo("WARNING: NCBI email is not set. Set ncbi.email or NCBI_EMAIL.")
+        console.print("[yellow]WARNING:[/yellow] NCBI email is not set. Set ncbi.email or NCBI_EMAIL.")
     Entrez.email = email or ""
 
     if api_key:
@@ -52,11 +260,34 @@ def setup_entrez(ncbi_cfg: Dict) -> None:
 def normalize_marker_map(markers_cfg: Dict) -> Dict[str, Dict]:
     marker_map: Dict[str, Dict] = {}
     for key, cfg in markers_cfg.items():
-        phrases = cfg.get("phrases")
-        if not phrases or not isinstance(phrases, list):
+        phrases = cfg.get("phrases") or []
+        terms = cfg.get("terms") or []
+        region_patterns = cfg.get("region_patterns") or []
+        header_format = cfg.get("header_format")
+        feature_types = cfg.get("feature_types")
+        feature_fields = cfg.get("feature_fields")
+        if not isinstance(phrases, list):
             raise typer.BadParameter(f"markers.{key}.phrases must be a list of strings.")
+        if not isinstance(terms, list):
+            raise typer.BadParameter(f"markers.{key}.terms must be a list of strings.")
+        if not isinstance(region_patterns, list):
+            raise typer.BadParameter(f"markers.{key}.region_patterns must be a list of strings.")
+        if feature_types is not None and not isinstance(feature_types, list):
+            raise typer.BadParameter(f"markers.{key}.feature_types must be a list of strings.")
+        if feature_fields is not None and not isinstance(feature_fields, list):
+            raise typer.BadParameter(f"markers.{key}.feature_fields must be a list of strings.")
+        if not phrases and not terms:
+            raise typer.BadParameter(f"markers.{key} must define phrases or terms.")
         aliases = cfg.get("aliases") or []
-        marker_map[key] = {"phrases": phrases, "aliases": aliases}
+        marker_map[key] = {
+            "phrases": phrases,
+            "terms": terms,
+            "aliases": aliases,
+            "region_patterns": region_patterns,
+            "header_format": header_format,
+            "feature_types": feature_types,
+            "feature_fields": feature_fields,
+        }
     return marker_map
 
 
@@ -86,17 +317,113 @@ def resolve_marker_key(value: str, marker_map: Dict[str, Dict]) -> str:
     raise typer.BadParameter(f"Marker '{value}' not found in config.")
 
 
+def is_raw_term(value: str) -> bool:
+    return "[" in value and "]" in value
+
+
 def build_marker_query(marker_keys: List[str], marker_map: Dict[str, Dict]) -> str:
     phrase_terms: List[str] = []
     for key in marker_keys:
-        for phrase in marker_map[key]["phrases"]:
-            phrase_escaped = phrase.replace('"', '\\"')
-            phrase_terms.append(f'"{phrase_escaped}"[All Fields]')
+        for term in marker_map[key].get("terms", []):
+            phrase_terms.append(term)
+        for phrase in marker_map[key].get("phrases", []):
+            if is_raw_term(phrase):
+                phrase_terms.append(phrase)
+            else:
+                phrase_escaped = phrase.replace('"', '\\"')
+                phrase_terms.append(f'"{phrase_escaped}"[All Fields]')
     if not phrase_terms:
         raise typer.BadParameter("No marker phrases resolved.")
     if len(phrase_terms) == 1:
         return phrase_terms[0]
-    return "(" + " OR ".join(phrase_terms) + ")"
+    return "(" + " OR ".join(f"({t})" for t in phrase_terms) + ")"
+
+
+def strip_field_spec(value: str) -> str:
+    stripped = re.sub(r"\s*\[[^\]]+\]", "", value)
+    return stripped.replace('"', "").strip()
+
+
+def build_region_patterns(marker_cfg: Dict) -> List[str]:
+    patterns = marker_cfg.get("region_patterns") or []
+    if patterns:
+        return patterns
+
+    raw = []
+    raw.extend(marker_cfg.get("terms", []))
+    raw.extend(marker_cfg.get("phrases", []))
+    cleaned = []
+    for item in raw:
+        stripped = strip_field_spec(item)
+        if stripped:
+            cleaned.append(re.escape(stripped))
+    return cleaned
+
+
+def compile_patterns(patterns: List[str]) -> List[re.Pattern]:
+    compiled = []
+    for pat in patterns:
+        if not pat:
+            continue
+        compiled.append(re.compile(pat, re.IGNORECASE))
+    return compiled
+
+
+def sanitize_header(text: str) -> str:
+    safe = re.sub(r"\s+", "_", text.strip())
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", safe)
+    return safe
+
+
+def resolve_header_format(cfg: Dict, output_cfg: Dict) -> str:
+    header_formats = output_cfg.get("header_formats") or {}
+    if not isinstance(header_formats, dict):
+        raise typer.BadParameter("[output].header_formats must be a table (dict).")
+    default_format = output_cfg.get("default_header_format", DEFAULT_HEADER_FORMAT)
+    if not isinstance(default_format, str):
+        raise typer.BadParameter("[output].default_header_format must be a string.")
+    header_key = cfg.get("header_format")
+    if not header_key:
+        return default_format
+    if not isinstance(header_key, str):
+        raise typer.BadParameter("markers.<id>.header_format must be a string.")
+    if header_key in header_formats:
+        value = header_formats[header_key]
+        if not isinstance(value, str):
+            raise typer.BadParameter(f"header_formats.{header_key} must be a string.")
+        return value
+    return header_key
+
+
+class SafeFormatDict(dict):
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+def build_header(template: str, values: Dict[str, str]) -> str:
+    return template.format_map(SafeFormatDict(values))
+
+
+def feature_texts(feature, fields: List[str]) -> List[str]:
+    texts: List[str] = []
+    for field in fields:
+        val = feature.qualifiers.get(field)
+        if not val:
+            continue
+        if isinstance(val, list):
+            texts.extend([str(v) for v in val])
+        else:
+            texts.append(str(val))
+    return texts
+
+
+def match_feature(feature, compiled_patterns: List[re.Pattern], fields: List[str]) -> Optional[str]:
+    texts = feature_texts(feature, fields)
+    for text in texts:
+        for pat in compiled_patterns:
+            if pat.search(text):
+                return text
+    return None
 
 
 def build_filter_terms(filters: Dict) -> List[str]:
@@ -176,7 +503,7 @@ def default_delay(ncbi_cfg: Dict) -> float:
     return 0.34
 
 
-def fetch_fasta(
+def fetch_genbank(
     query: str,
     ncbi_cfg: Dict,
     delay_sec: float,
@@ -186,6 +513,9 @@ def fetch_fasta(
     retmode = ncbi_cfg.get("retmode", "text")
     per_query = int(ncbi_cfg.get("per_query", 100))
     use_history = bool(ncbi_cfg.get("use_history", True))
+
+    if rettype not in {"gb", "gbwithparts"}:
+        raise typer.BadParameter("ncbi.rettype must be 'gb' or 'gbwithparts' for region extraction.")
 
     handle = Entrez.esearch(db=db, term=query, retmax=0, usehistory="y" if use_history else "n")
     record = Entrez.read(handle)
@@ -264,10 +594,20 @@ def build(
     marker: List[str] = typer.Option(..., "--marker", "-m", help="Marker key or prefix."),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output file or directory."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print query and exit."),
+    workers: int = typer.Option(2, "--workers", "-w", help="Number of extraction workers."),
 ):
+    """
+    Build a FASTA database by downloading GenBank records and extracting features.
+
+    Examples:
+      taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s
+      taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m mitogenome
+      taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s --workers 2
+    """
     cfg = load_config(config)
     ncbi_cfg = cfg.get("ncbi", {})
     filters_cfg = cfg.get("filters", {})
+    output_cfg = cfg.get("output", {})
     taxon_noexp = bool(cfg.get("taxon", {}).get("noexp", False))
 
     setup_entrez(ncbi_cfg)
@@ -275,6 +615,37 @@ def build(
 
     marker_keys = [resolve_marker_key(m, marker_map) for m in marker]
     marker_query = build_marker_query(marker_keys, marker_map)
+    marker_rules = []
+    for key in marker_keys:
+        cfg_m = marker_map[key]
+        region_patterns = build_region_patterns(cfg_m)
+        if not region_patterns:
+            raise typer.BadParameter(f"markers.{key} has no patterns for region extraction.")
+        compiled = compile_patterns(region_patterns)
+        if not compiled:
+            raise typer.BadParameter(f"markers.{key} patterns did not compile.")
+
+        feature_types = cfg_m.get("feature_types")
+        if feature_types is None:
+            feature_types = DEFAULT_FEATURE_TYPES
+        elif not feature_types:
+            feature_types = None
+
+        feature_fields = cfg_m.get("feature_fields")
+        if feature_fields is None:
+            feature_fields = DEFAULT_FEATURE_FIELDS
+        elif not feature_fields:
+            raise typer.BadParameter(f"markers.{key}.feature_fields cannot be empty.")
+
+        marker_rules.append(
+            {
+                "key": key,
+                "patterns": compiled,
+                "feature_types": feature_types,
+                "feature_fields": feature_fields,
+                "header_format": resolve_header_format(cfg_m, output_cfg),
+            }
+        )
 
     taxids: List[str] = []
     warnings: List[str] = []
@@ -297,67 +668,111 @@ def build(
         log_lines.append("# warnings:")
         log_lines.extend([f"# - {w}" for w in warnings])
 
+    print_header()
+    render_run_table(config, taxids, marker_keys, out_path, filters_cfg)
+    for w in warnings:
+        console.print(f"[yellow]WARNING:[/yellow] {w}")
+
     if dry_run:
         for taxid in taxids:
             query = build_query(taxid, marker_query, filters_cfg, taxon_noexp)
-            typer.echo(query)
+            console.print(query)
         return
 
     acc_to_seqs: Dict[str, set] = {}
-    total_records = 0
-    kept_records = 0
-    skipped_same = 0
-    duplicated_diff = 0
+    counters = {
+        "total_records": 0,
+        "matched_records": 0,
+        "matched_features": 0,
+        "kept_records": 0,
+        "skipped_same": 0,
+        "duplicated_diff": 0,
+    }
     dup_accessions: Dict[str, int] = {}
 
-    with out_path.open("w", encoding="utf-8") as out_f:
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        disable=not console.is_terminal,
+    )
+
+    lock = Lock()
+    log_lines.append(f"# workers: {workers}")
+
+    with out_path.open("w", encoding="utf-8") as out_f, progress:
         for taxid in taxids:
             query = build_query(taxid, marker_query, filters_cfg, taxon_noexp)
             log_lines.append(f"# query taxid={taxid}: {query}")
             delay_sec = default_delay(ncbi_cfg)
-            data_iter = fetch_fasta(query, ncbi_cfg, delay_sec)
+            data_iter = fetch_genbank(query, ncbi_cfg, delay_sec)
             count_line = next(data_iter)
             count = int(count_line.split("=", 1)[1])
             log_lines.append(f"# query count taxid={taxid}: {count}")
-            typer.echo(f"taxid {taxid}: {count} records")
+            if count == 0:
+                console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
+                continue
+
+            task_id = progress.add_task(f"taxid {taxid}", total=count)
+            if workers < 1:
+                raise typer.BadParameter("--workers must be >= 1.")
+
+            q: Queue = Queue(maxsize=max(1, workers * 2))
+            stop_event = Event()
+            errors: List[Exception] = []
+
+            def worker() -> None:
+                while True:
+                    item = q.get()
+                    if item is None:
+                        q.task_done()
+                        break
+                    try:
+                        process_genbank_chunk(
+                            item,
+                            marker_rules,
+                            acc_to_seqs,
+                            out_f,
+                            counters,
+                            dup_accessions,
+                            lock,
+                            progress,
+                            task_id,
+                        )
+                    except Exception as exc:
+                        errors.append(exc)
+                        stop_event.set()
+                    finally:
+                        q.task_done()
+
+            threads = [Thread(target=worker, daemon=True) for _ in range(workers)]
+            for t in threads:
+                t.start()
 
             for chunk in data_iter:
+                if stop_event.is_set():
+                    break
                 if not chunk:
                     continue
-                handle = io.StringIO(chunk)
-                for record in SeqIO.parse(handle, "fasta"):
-                    total_records += 1
-                    acc = record.id
-                    seq = str(record.seq).upper()
-                    seqs = acc_to_seqs.setdefault(acc, set())
-                    if seq in seqs:
-                        skipped_same += 1
-                        continue
+                q.put(chunk)
 
-                    dup_index = None
-                    if seqs:
-                        dup_index = len(seqs) + 1
-                        duplicated_diff += 1
-                        dup_accessions[acc] = dup_accessions.get(acc, 1) + 1
+            for _ in threads:
+                q.put(None)
+            q.join()
+            for t in threads:
+                t.join()
+            if errors:
+                raise errors[0]
 
-                    seqs.add(seq)
-
-                    desc_parts = record.description.split(None, 1)
-                    rest = desc_parts[1] if len(desc_parts) > 1 else ""
-                    if dup_index:
-                        new_id = f"{acc}_dup{dup_index}"
-                        header = f"{new_id} {rest} dup{dup_index}".strip()
-                    else:
-                        header = f"{acc} {rest}".strip()
-
-                    out_f.write(f">{header}\n")
-                    out_f.write(f"{seq}\n")
-                    kept_records += 1
-
-    log_lines.append(f"# total records: {total_records}")
-    log_lines.append(f"# kept records: {kept_records}")
-    log_lines.append(f"# skipped duplicates (same accession+sequence): {skipped_same}")
-    log_lines.append(f"# kept duplicates (same accession, different sequence): {duplicated_diff}")
+    log_lines.append(f"# total records: {counters['total_records']}")
+    log_lines.append(f"# matched records: {counters['matched_records']}")
+    log_lines.append(f"# matched features: {counters['matched_features']}")
+    log_lines.append(f"# kept records: {counters['kept_records']}")
+    log_lines.append(f"# skipped duplicates (same accession+sequence): {counters['skipped_same']}")
+    log_lines.append(f"# kept duplicates (same accession, different sequence): {counters['duplicated_diff']}")
     if dup_accessions:
         log_lines.append("# duplicate accessions with different sequences:")
         for acc, count in sorted(dup_accessions.items()):
@@ -366,10 +781,20 @@ def build(
     log_lines.append(f"# finished: {datetime.now().isoformat()}")
 
     write_log(log_path, log_lines)
-    typer.echo(f"Output FASTA: {out_path}")
-    typer.echo(f"Log: {log_path}")
+    render_result_table(
+        counters["total_records"],
+        counters["matched_records"],
+        counters["matched_features"],
+        counters["kept_records"],
+        counters["skipped_same"],
+        counters["duplicated_diff"],
+        out_path,
+        log_path,
+    )
     if dup_accessions:
-        typer.echo("WARNING: duplicate accessions with different sequences were kept. See log for details.")
+        console.print(
+            "[yellow]WARNING:[/yellow] duplicate accessions with different sequences were kept. See log for details."
+        )
 
 
 if __name__ == "__main__":

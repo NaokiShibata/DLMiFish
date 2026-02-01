@@ -16,6 +16,9 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
+# Local testing
+test/
+
 # Outputs
 Results/*
 !Results/.gitkeep
