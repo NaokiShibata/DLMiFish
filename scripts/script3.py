@@ -100,14 +100,15 @@ if __name__ == '__main__':
     print(' --- program started; ', timestamp(), '\n')
     dt_start = datetime.now()
 
-    gi_filepath = os.listdir('./GI_Folder')
+    gi_filepath = sorted(f for f in os.listdir('./GI_Folder') if f.lower().endswith('.gb'))
     
     @delayed
-    def gen_fa(gilist):
+    def gen_fa(gi_file):
         # basket to product var
-        product_var = []
+        product_var = set()
+        species_var = set()
 
-        for record in SeqIO.parse(f'./GI_Folder/{gi_filepath[gilist]}', 'genbank'):
+        for record in SeqIO.parse(f'./GI_Folder/{gi_file}', 'genbank'):
 
             # basket to collect rRNA slices
             rRNA_records = []
@@ -134,7 +135,8 @@ if __name__ == '__main__':
                     else:
                         product = 'NA'
 
-                    product_var += product.split(',')
+                    product_var.update([p.strip() for p in product.split(',') if p.strip()])
+                    species_var.add(organism)
 
                     rRNA_id_line = acc + '_' + organism + '_' + product
                     rRNA_id_line += '_(' + str(start) + '-' + str(end) + ')'
@@ -143,17 +145,14 @@ if __name__ == '__main__':
                     # output file name construction
                     rRNA_records.append(makeSeqRecord(seq_slice, rRNA_id_line))
 
-                    # log DL species list
-                    with open('./Results/MiFishSeq_temp_dlsplist.txt', mode = 'a') as spltemp:
-                        spltemp.write(organism + '\n')
-
             check = 1
             for feature in record.features:
                 if feature.type == 'rRNA':
                     
                     # Avoid ACC of shortgun genome sequences that do not contain sequence information.
                     key = re.compile('WGS.*')
-                    if not key.search(str(record.annotations['keywords']).upper()):
+                    keywords = record.annotations.get('keywords', [])
+                    if not key.search(str(keywords).upper()):
                         rRNA_count = len(rRNA_records)
                         if rRNA_count == 1:
                             out_fasta = f'./Results/fasta/{acc}_all-rRNA_1.fasta'
@@ -180,21 +179,25 @@ if __name__ == '__main__':
                         else:
                             ofa.write('NO rRNA ANNOTATION FOUND')
 
-            # make product list
-            with open('./Results/product_list.tsv', mode = 'a') as prod:
-                prod.write('\n'.join(map(str,set(product_var))) + '\n')
+        return species_var, product_var
 
     # parallel run
     with tqdm_joblib(len(gi_filepath)):
-                     joblib.Parallel(n_jobs=-1)(gen_fa(gilist) for gilist in range(len(gi_filepath)))
+                     results = joblib.Parallel(n_jobs=-1)(gen_fa(gi_file) for gi_file in gi_filepath)
 
-    # remove duplicate spcies list    
-    with open('./Results/MiFishSeq_temp_dlsplist.txt', mode = 'r') as spltemp2:
-        with open('./Results/MiFishSeq_dlsplist.txt', mode = 'a') as spl:
-            spl.write(''.join(map(str, set(spltemp2.readlines()))))
-    
-    # remove temp splist file
-    pathlib.Path('./Results/MiFishSeq_temp_dlsplist.txt', missing_ok=True).unlink()
+    species_all = set()
+    product_lines = []
+    for species_var, product_var in results:
+        species_all.update(species_var)
+        product_lines.extend(sorted(product_var))
+
+    with open('./Results/MiFishSeq_dlsplist.txt', mode = 'w', encoding = 'utf-8') as spl:
+        if species_all:
+            spl.write('\n'.join(sorted(species_all)) + '\n')
+
+    with open('./Results/product_list.tsv', mode = 'w', encoding = 'utf-8') as prod:
+        if product_lines:
+            prod.write('\n'.join(product_lines) + '\n')
 
 
 dt_now = datetime.now()

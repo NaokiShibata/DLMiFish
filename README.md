@@ -14,6 +14,7 @@ windows10 WSLとUbuntu 20.04 LTSでの動作を確認しています。
   - tqdm
   - joblib
   - cutadapt
+  - typer
 - conda : 最新版 or pythonのバージョンにあったもの
 - [mamba](https://github.com/mamba-org/mamba) : 最新版 or pythonのバージョンにあったもの
 - seqkit : version2.0以上
@@ -46,9 +47,9 @@ minicondaをベースとした`Conda`での仮想環境作成法は以下のブ�
 
   ### Install
   ```bash
-  mamba install bioconda bipython cutadapt -y
+  mamba install -c bioconda biopython cutadapt -y
   mamba install -c anaconda pandas -y
-  mamba install -c conda-forge tqdm joblib -y
+  mamba install -c conda-forge tqdm joblib typer -y
   ```
 次に、fastqやfastaの操作ツールである`seqkit`をインストールします。 
 
@@ -155,5 +156,7 @@ __配列長によるフィルタリング__
 ```bash
 python3 DLMiFish.py
 ```
+
+単体で各スクリプトを実行する場合は、Typerの引数として実行日を渡してください（例: `python3 scripts/script2.py 20240201`）。
 
 ※ 2023/9/30時点で*18041*本の配列がHitし、ダウンロードには50分かかりました。

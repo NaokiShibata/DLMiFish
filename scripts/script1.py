@@ -48,7 +48,7 @@ def check_result_folder():
         with open('./ID/ID.txt', mode = 'w') as i:
             i.write('')        
     else:
-        pathlib.Path('./ID/ID.txt', missing_ok = True).unlink()
+        pathlib.Path('./ID/ID.txt').unlink(missing_ok = True)
 
     # Cechk Fasta file folder
     if not os.path.exists('./Results/fasta'):
@@ -126,13 +126,11 @@ if __name__ == '__main__':
     print('')
 
     # Teleo
-    handle_teleo = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid32443[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]')
-    term_teleo = f'txid32443[Organism] AND 12S[All Fields]) AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]'
+    term_teleo = f'txid32443[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN])'
+    handle_teleo = Entrez.esearch(db=db, retmax=count_in_query, term=term_teleo)
 
-    handle_comp_teleo = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid32443[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]')
-    term_comp_teleo = f'txid32443[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]'
+    term_comp_teleo = f'txid32443[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT])'
+    handle_comp_teleo = Entrez.esearch(db=db, retmax=count_in_query, term=term_comp_teleo)
 
     print('')
     print( ' --- Teleostei nucleotide search term is')
@@ -140,13 +138,11 @@ if __name__ == '__main__':
     print(f' --- {term_comp_teleo}')
 
     # Chondri
-    handle_chondri = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid7777[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]')
-    term_chondri = f'txid7777[Organism] AND 12S[All Fields]) AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]'
+    term_chondri = f'txid7777[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN])'
+    handle_chondri = Entrez.esearch(db=db, retmax=count_in_query, term=term_chondri)
 
-    handle_comp_chondri = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid7777[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]')
-    term_comp_chondri = f'txid7777[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]'
+    term_comp_chondri = f'txid7777[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT])'
+    handle_comp_chondri = Entrez.esearch(db=db, retmax=count_in_query, term=term_comp_chondri)
 
     print('')
     print( ' --- Chondri nucleotide search term is')
@@ -154,13 +150,11 @@ if __name__ == '__main__':
     print(f' --- {term_comp_chondri}')
 
     # Cyclostomata
-    handle_cyclostomata = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid1476529[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]')
-    term_cyclostomata = f'txid1476529[Organism] AND 12S[All Fields]) AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN]'
+    term_cyclostomata = f'txid1476529[Organism] AND 12S[All Fields] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT] AND 120[SLEN] : 30000[SLEN])'
+    handle_cyclostomata = Entrez.esearch(db=db, retmax=count_in_query, term=term_cyclostomata)
 
-    handle_comp_cyclostomata = Entrez.esearch(db=db, retmax=count_in_query,\
-        term = f'txid1476529[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]')
-    term_comp_cyclostomata = f'txid1476529[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT]'
+    term_comp_cyclostomata = f'txid1476529[Organism] AND complete[prop] AND (ddbj_embl_genbank[filter] AND is_nuccore[filter] AND mitochondrion[filter] AND {before_date}[PDAT] : {max_date}[PDAT])'
+    handle_comp_cyclostomata = Entrez.esearch(db=db, retmax=count_in_query, term=term_comp_cyclostomata)
 
     print('')
     print( ' --- Cyclostomata nucleotide search term is')
