@@ -42,6 +42,28 @@ uv pip install -r requirements.txt
 ### 補足
 - uvはPythonパッケージのみを扱います。現時点で外部ツールは不要です。
 
+## クイックスタート
+環境構築から **GenBankキャッシュ付きの実行** までの最短手順です。
+
+```bash
+# 1) 仮想環境と依存導入
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# 2) 設定（api_key / email を入力）
+# configs/db.toml を編集
+
+# 3) 実行（GenBankキャッシュ保存）
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb
+```
+
+再実行時にキャッシュを優先して使う場合:
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
+```
+
 ## 設定ファイル (TOML)
 `configs/db.toml` を編集して使います。
 
@@ -202,6 +224,9 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--workers` | なし | 抽出処理の並列数 |
 | `--out` | なし | 出力先 (省略時は `Results/db/YYYYMMDD/`) |
 | `--output-prefix` | なし | 出力FASTAファイル名のプレフィックス (default: `taxondbbuilder_`) |
+| `--dump-gb` | なし | GenBankチャンクを保存 (キャッシュ) |
+| `--from-gb` | なし | 保存済みGenBankチャンクから抽出 |
+| `--resume` | なし | キャッシュを優先して利用 |
 
 ### 具体例 (設定とコマンドの対応)
 1) `markers_file` に `12s` を定義しておく
@@ -225,6 +250,23 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --output-prefix "mifish"
 ```
+
+GenBankを保存しつつ実行 (acc_idごとに `.gb` を保存):
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb
+```
+
+保存済みGenBankから再抽出:
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Results/gb
+```
+
+中断後の再開 (キャッシュ利用):
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
+```
+
+キャッシュは `Results/gb/.cache/` に保存されます。
 
 ### taxid指定
 ```bash
@@ -262,6 +304,12 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 - 出力先: `Results/db/YYYYMMDD/`
 - ファイル名: `taxid{ID}__{marker}.fasta` (複数指定時は `multi_taxon` / `multi_marker`)
 - 実行ログ: 出力FASTAと同名の `.log`
+
+## キャッシュと再抽出
+- `--dump-gb` で **acc_idごとのGenBankファイル** を保存します。
+- キャッシュは `--dump-gb` 配下の `.cache/` に保存されます。
+- `--resume` は **キャッシュがある場合にそれを優先**して使います（出力は毎回新規に作り直します）。
+- `--from-gb` はネットワークを使わず、保存済みGenBankから抽出のみを実行します。
 
 ## 重複の扱い
 - **同一アクセッション + 同一配列**: 重複として除外
