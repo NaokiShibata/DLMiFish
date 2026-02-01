@@ -10,6 +10,7 @@ from datetime import datetime
 import shutil
 from Bio import Entrez
 import sys
+import typer
 
 # Function define
 def timestamp():
@@ -50,7 +51,9 @@ class Color:
 Entrez.email = re.search(r'Email\s*=\s*(\S+)',txt).group(1)
 Entrez.api_key = re.search(r'Api_key\s*=\s*(\S+)',txt).group(1)
 
-if __name__ == "__main__":
+def run(
+    runday: str = typer.Argument(..., help="Run date string (e.g. 20240201) used for log file naming."),
+):
     print('\n' + Color.GREEN + \
         '# =============================== #\n' + \
         '# === Convert sequence format === #\n' + \
@@ -76,7 +79,10 @@ if __name__ == "__main__":
 
     # Merge fasta file by shell command and seqkit
     mcom = 'cat ./Results/fasta/*.fasta | seqkit seq -w 0 > ./Results/fasta/rRNA.fas'
-    sp.run(mcom , shell = True)
+    merge_res = sp.run(mcom, shell = True)
+    if merge_res.returncode != 0 or not os.path.isfile(merged_fasta) or os.path.getsize(merged_fasta) == 0:
+        print(' --- Merge failed. Check seqkit installation and input FASTA files.')
+        sys.exit(1)
 
     # remove each fasta sequence because already merge those
     for f in fasta_list:
@@ -90,8 +96,12 @@ if __name__ == "__main__":
         pass
 
     # Extracat 12s rRNA sequence by seqkit
-    ecom = f"seqkit grep -w 0 -nirp '12s|s-rrna|small|rrnS' ./Results/fasta/rRNA.fas > ./Results/fasta/{dt_start_f2}_12s/00_12srRNA_merge.fas"
-    sp.run(ecom, shell = True)
+    pattern = '12s|s-rrna|rrns|small subunit ribosomal rna'
+    ecom = f"seqkit grep -w 0 -nirp '{pattern}' ./Results/fasta/rRNA.fas > ./Results/fasta/{dt_start_f2}_12s/00_12srRNA_merge.fas"
+    grep_res = sp.run(ecom, shell = True)
+    if grep_res.returncode != 0:
+        print(' --- 12s extraction failed. Check seqkit installation and input FASTA files.')
+        sys.exit(1)
 
     print('\n' + Color.GREEN + \
         '# ============================================ #\n' + \
@@ -108,7 +118,6 @@ if __name__ == "__main__":
     shutil.move(f'./Results/fasta/{dt_start_f2}_12s/00_12srRNA_merge.fas', db_dir)
 
     # Miving log file
-    runday = sys.argv[1]
     shutil.move(f'./Results/{runday}_ID_download_log.txt',db_dir) 
     
     # product var
@@ -149,11 +158,12 @@ if __name__ == "__main__":
     ### option ###
     opt = re.search(r'option\s*=\s*(\S+)',txt).group(1)
     err = re.search(r'error\s*=\s*(\S+)',txt).group(1)
+    cores = re.search(r'cores\s*=\s*(\S+)',txt).group(1)
     minL = re.search(r'minlength\s*=\s*(\S+)',txt).group(1)
 
     if re.match(opt, 'yes', flags = re.IGNORECASE):
-        error = 0
-        cores = 24
+        error = float(err)
+        cores = int(cores)
         input = f'{db_dir}/01_12srRNA_merge2.fas'
         lastout = f'{db_dir}/02_12srRNA_merge3.fas'
 
@@ -242,3 +252,5 @@ if __name__ == "__main__":
         print(' --- Done.ET:' + et + '\n')
         pass
 
+if __name__ == "__main__":
+    typer.run(run)
