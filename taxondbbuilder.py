@@ -55,6 +55,9 @@ def render_run_table(
     markers: List[str],
     out_path: Path,
     filters_cfg: Dict,
+    dump_gb: Optional[Path] = None,
+    from_gb: Optional[Path] = None,
+    resume: bool = False,
 ) -> None:
     table = Table(title="Run Summary", show_header=True, header_style="bold")
     table.add_column("Item")
@@ -67,6 +70,12 @@ def render_run_table(
         table.add_row("Filters", ", ".join(sorted(filters_cfg.keys())))
     else:
         table.add_row("Filters", "none")
+    if from_gb:
+        table.add_row("From GB", str(from_gb))
+    if dump_gb:
+        table.add_row("Dump GB", str(dump_gb))
+    if resume:
+        table.add_row("Resume", "true")
     console.print(table)
 
 
@@ -104,6 +113,8 @@ def process_genbank_chunk(
     lock: Lock,
     progress: Progress,
     task_id: int,
+    taxid: str,
+    dump_gb_dir: Optional[Path],
 ) -> None:
     handle = io.StringIO(chunk)
     for record in SeqIO.parse(handle, "genbank"):
@@ -118,6 +129,16 @@ def process_genbank_chunk(
         organism = record.annotations.get("organism", "unknown")
         organism_safe = sanitize_header(str(organism))
         record_matched = False
+
+        if dump_gb_dir:
+            gb_root = dump_gb_dir / f"taxid{taxid}"
+            gb_root.mkdir(parents=True, exist_ok=True)
+            acc_safe = sanitize_header(acc)
+            gb_path = gb_root / f"{acc_safe}.gb"
+            with lock:
+                if not gb_path.exists():
+                    with gb_path.open("w", encoding="utf-8") as f:
+                        SeqIO.write(record, f, "genbank")
 
         for feature in record.features:
             matched_label = None
@@ -201,10 +222,10 @@ def process_genbank_chunk(
                 out_f.write(f">{header}\n")
                 out_f.write(f"{seq}\n")
                 counters["kept_records"] += 1
-
         if record_matched:
             with lock:
                 counters["matched_records"] += 1
+
 
 
 def load_config(path: Path) -> Dict:
@@ -504,7 +525,11 @@ def fetch_genbank(
     query: str,
     ncbi_cfg: Dict,
     delay_sec: float,
-) -> Iterable[str]:
+    start_at: int = 0,
+    dump_dir: Optional[Path] = None,
+    resume: bool = False,
+    taxid: Optional[str] = None,
+) -> Tuple[int, Iterable[Tuple[int, str]]]:
     db = ncbi_cfg.get("db", "nucleotide")
     rettype = ncbi_cfg.get("rettype", "fasta")
     retmode = ncbi_cfg.get("retmode", "text")
@@ -520,47 +545,93 @@ def fetch_genbank(
     webenv = record.get("WebEnv")
     query_key = record.get("QueryKey")
 
-    yield f"__COUNT__={count}"
     if count == 0:
-        return
+        return 0, []
 
-    if use_history and webenv and query_key:
-        for start in range(0, count, per_query):
+    cache_root = None
+    if dump_dir:
+        cache_root = dump_dir / ".cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+
+    def dump_path_for(start: int) -> Optional[Path]:
+        if not cache_root:
+            return None
+        return cache_root / f"start{start:09d}_count{per_query:04d}.cache"
+
+    def load_cached(start: int) -> Optional[str]:
+        path = dump_path_for(start)
+        if path and path.exists():
+            return path.read_text(encoding="utf-8", errors="ignore")
+        return None
+
+    def save_cached(start: int, data: str) -> None:
+        path = dump_path_for(start)
+        if path:
+            path.write_text(data, encoding="utf-8")
+
+    def gen() -> Iterable[Tuple[int, str]]:
+        if use_history and webenv and query_key:
+            for start in range(start_at, count, per_query):
+                cached = load_cached(start) if resume else None
+                if cached is not None:
+                    yield start, cached
+                    continue
+                fetch_handle = Entrez.efetch(
+                    db=db,
+                    rettype=rettype,
+                    retmode=retmode,
+                    retstart=start,
+                    retmax=per_query,
+                    webenv=webenv,
+                    query_key=query_key,
+                )
+                data = fetch_handle.read()
+                if cache_root:
+                    save_cached(start, data)
+                yield start, data
+                time.sleep(delay_sec)
+            return
+
+        for start in range(start_at, count, per_query):
+            cached = load_cached(start) if resume else None
+            if cached is not None:
+                yield start, cached
+                continue
+            search_handle = Entrez.esearch(
+                db=db,
+                term=query,
+                retstart=start,
+                retmax=per_query,
+                usehistory="n",
+            )
+            search_record = Entrez.read(search_handle)
+            ids = search_record.get("IdList", [])
+            if not ids:
+                continue
             fetch_handle = Entrez.efetch(
                 db=db,
                 rettype=rettype,
                 retmode=retmode,
-                retstart=start,
-                retmax=per_query,
-                webenv=webenv,
-                query_key=query_key,
+                id=",".join(ids),
             )
             data = fetch_handle.read()
-            yield data
+            if cache_root:
+                save_cached(start, data)
+            yield start, data
             time.sleep(delay_sec)
-        return
 
-    for start in range(0, count, per_query):
-        search_handle = Entrez.esearch(
-            db=db,
-            term=query,
-            retstart=start,
-            retmax=per_query,
-            usehistory="n",
-        )
-        search_record = Entrez.read(search_handle)
-        ids = search_record.get("IdList", [])
-        if not ids:
-            continue
-        fetch_handle = Entrez.efetch(
-            db=db,
-            rettype=rettype,
-            retmode=retmode,
-            id=",".join(ids),
-        )
-        data = fetch_handle.read()
-        yield data
-        time.sleep(delay_sec)
+    return count, gen()
+
+
+def iter_genbank_files(from_dir: Path, taxid: Optional[str] = None) -> Iterable[Tuple[int, str]]:
+    gb_root = from_dir
+    if taxid:
+        candidate = from_dir / f"taxid{taxid}"
+        if candidate.exists():
+            gb_root = candidate
+    files = sorted(gb_root.glob("*.gb"))
+    for idx, path in enumerate(files):
+        yield idx, path.read_text(encoding="utf-8", errors="ignore")
 
 
 def build_output_path(
@@ -598,6 +669,17 @@ def build(
     taxon: List[str] = typer.Option(..., "--taxon", "-t", help="Taxon (taxid or scientific name)."),
     marker: List[str] = typer.Option(..., "--marker", "-m", help="Marker key or prefix."),
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output file or directory."),
+    dump_gb: Optional[Path] = typer.Option(
+        None,
+        "--dump-gb",
+        help="Directory to store GenBank chunks for caching.",
+    ),
+    from_gb: Optional[Path] = typer.Option(
+        None,
+        "--from-gb",
+        help="Directory of GenBank chunks to extract without downloading.",
+    ),
+    resume: bool = typer.Option(False, "--resume", help="Resume using cached GenBank chunks."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print query and exit."),
     workers: int = typer.Option(2, "--workers", "-w", help="Number of extraction workers."),
     output_prefix: str = typer.Option(
@@ -614,6 +696,8 @@ def build(
       taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m mitogenome
       taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
       taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --output-prefix "mifish"
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Results/gb
     """
     cfg = load_config(config)
     ncbi_cfg = cfg.get("ncbi", {})
@@ -669,6 +753,12 @@ def build(
 
     out_path = build_output_path(out, taxids, marker_keys, output_prefix=output_prefix)
     log_path = out_path.with_suffix(out_path.suffix + ".log")
+    if resume and not dump_gb and not from_gb:
+        raise typer.BadParameter("--resume requires --dump-gb or --from-gb.")
+    if from_gb and not from_gb.exists():
+        raise typer.BadParameter(f"--from-gb not found: {from_gb}")
+    if dump_gb:
+        dump_gb.mkdir(parents=True, exist_ok=True)
 
     log_lines = []
     log_lines.append(f"# started: {datetime.now().isoformat()}")
@@ -676,12 +766,16 @@ def build(
     log_lines.append(f"# taxon input: {taxon}")
     log_lines.append(f"# taxids: {taxids}")
     log_lines.append(f"# markers: {marker_keys}")
+    log_lines.append(f"# output_prefix: {output_prefix}")
+    log_lines.append(f"# dump_gb: {dump_gb}" if dump_gb else "# dump_gb: none")
+    log_lines.append(f"# from_gb: {from_gb}" if from_gb else "# from_gb: none")
+    log_lines.append(f"# resume: {resume}")
     if warnings:
         log_lines.append("# warnings:")
         log_lines.extend([f"# - {w}" for w in warnings])
 
     print_header()
-    render_run_table(config, taxids, marker_keys, out_path, filters_cfg)
+    render_run_table(config, taxids, marker_keys, out_path, filters_cfg, dump_gb, from_gb, resume)
     for w in warnings:
         console.print(f"[yellow]WARNING:[/yellow] {w}")
 
@@ -720,13 +814,23 @@ def build(
             query = build_query(taxid, marker_query, filters_cfg, taxon_noexp)
             log_lines.append(f"# query taxid={taxid}: {query}")
             delay_sec = default_delay(ncbi_cfg)
-            data_iter = fetch_genbank(query, ncbi_cfg, delay_sec)
-            count_line = next(data_iter)
-            count = int(count_line.split("=", 1)[1])
-            log_lines.append(f"# query count taxid={taxid}: {count}")
-            if count == 0:
-                console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
-                continue
+            if from_gb:
+                data_iter = iter_genbank_files(from_gb, taxid)
+                count = None
+                log_lines.append(f"# query count taxid={taxid}: from-gb")
+            else:
+                count, data_iter = fetch_genbank(
+                    query,
+                    ncbi_cfg,
+                    delay_sec,
+                    dump_dir=dump_gb,
+                    resume=resume,
+                    taxid=taxid,
+                )
+                log_lines.append(f"# query count taxid={taxid}: {count}")
+                if count == 0:
+                    console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
+                    continue
 
             task_id = progress.add_task(f"taxid {taxid}", total=count)
             if workers < 1:
@@ -743,8 +847,9 @@ def build(
                         q.task_done()
                         break
                     try:
+                        start, chunk = item
                         process_genbank_chunk(
-                            item,
+                            chunk,
                             marker_rules,
                             acc_to_seqs,
                             out_f,
@@ -753,6 +858,8 @@ def build(
                             lock,
                             progress,
                             task_id,
+                            taxid,
+                            dump_gb,
                         )
                     except Exception as exc:
                         errors.append(exc)
@@ -764,12 +871,12 @@ def build(
             for t in threads:
                 t.start()
 
-            for chunk in data_iter:
+            for start, chunk in data_iter:
                 if stop_event.is_set():
                     break
                 if not chunk:
                     continue
-                q.put(chunk)
+                q.put((start, chunk))
 
             for _ in threads:
                 q.put(None)
