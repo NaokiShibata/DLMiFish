@@ -1,0 +1,38 @@
+[ncbi]
+# Provide either in config or via env vars NCBI_EMAIL / NCBI_API_KEY.
+email = "your.email@example.com"
+api_key = "YOUR_API_KEY"
+
+db = "nucleotide"
+rettype = "fasta"
+retmode = "text"
+per_query = 100
+use_history = true
+# delay_sec overrides default rate-limit delay.
+# delay_sec = 0.34
+
+# Taxon options
+[taxon]
+# If true, do not expand descendants in taxon search.
+noexp = false
+
+# Marker definitions (keys are marker IDs)
+[markers."12s"]
+aliases = ["12", "12s"]
+phrases = ["12S", "rrnS", "small subunit ribosomal RNA"]
+
+[markers."coi"]
+aliases = ["coi", "co1"]
+phrases = ["COI", "CO1", "cytochrome c oxidase subunit I"]
+
+# Optional filters. If unset, no filtering is applied.
+[filters]
+# organelle = "mitochondrion"
+# length_min = 120
+# length_max = 30000
+# source = "ddbj_embl_genbank"
+# date_from = "1990/01/01"
+# date_to = "2025/12/31"
+# include_keywords = ["12S"]
+# exclude_keywords = ["WGS"]
+# extra = "complete[prop]"
