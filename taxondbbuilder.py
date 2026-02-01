@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 import io
 import os
 import re
@@ -11,8 +9,7 @@ from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import typer
-from Bio import Entrez
-from Bio import SeqIO
+from Bio import Entrez, SeqIO
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -566,7 +563,12 @@ def fetch_genbank(
         time.sleep(delay_sec)
 
 
-def build_output_path(out: Optional[Path], taxids: List[str], markers: List[str]) -> Path:
+def build_output_path(
+    out: Optional[Path],
+    taxids: List[str],
+    markers: List[str],
+    output_prefix: str = "",
+) -> Path:
     run_date = datetime.now().strftime("%Y%m%d")
     if out:
         if out.suffix in {".fa", ".fasta", ".fas"}:
@@ -579,7 +581,10 @@ def build_output_path(out: Optional[Path], taxids: List[str], markers: List[str]
     out_dir.mkdir(parents=True, exist_ok=True)
     taxon_label = f"taxid{'+'.join(taxids)}" if len(taxids) == 1 else "multi_taxon"
     marker_label = "+".join(markers) if len(markers) == 1 else "multi_marker"
-    return out_dir / f"{taxon_label}__{marker_label}.fasta"
+    prefix = output_prefix
+    if prefix and not prefix.endswith("_"):
+        prefix = prefix + "_"
+    return out_dir / f"{prefix}{taxon_label}__{marker_label}.fasta"
 
 
 def write_log(log_path: Path, lines: List[str]) -> None:
@@ -595,14 +600,20 @@ def build(
     out: Optional[Path] = typer.Option(None, "--out", "-o", help="Output file or directory."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print query and exit."),
     workers: int = typer.Option(2, "--workers", "-w", help="Number of extraction workers."),
+    output_prefix: str = typer.Option(
+        "taxondbbuilder_",
+        "--output-prefix",
+        help="Prefix added to output FASTA filename.",
+    ),
 ):
     """
     Build a FASTA database by downloading GenBank records and extracting features.
 
-    Examples:
-      taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s
+    Examples (Teleostomi):
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s
       taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m mitogenome
-      taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s --workers 2
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --output-prefix "mifish"
     """
     cfg = load_config(config)
     ncbi_cfg = cfg.get("ncbi", {})
@@ -615,6 +626,7 @@ def build(
 
     marker_keys = [resolve_marker_key(m, marker_map) for m in marker]
     marker_query = build_marker_query(marker_keys, marker_map)
+    output_prefix = output_prefix.strip()
     marker_rules = []
     for key in marker_keys:
         cfg_m = marker_map[key]
@@ -655,7 +667,7 @@ def build(
         if warn:
             warnings.append(warn)
 
-    out_path = build_output_path(out, taxids, marker_keys)
+    out_path = build_output_path(out, taxids, marker_keys, output_prefix=output_prefix)
     log_path = out_path.with_suffix(out_path.suffix + ".log")
 
     log_lines = []

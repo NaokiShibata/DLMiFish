@@ -149,6 +149,9 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 - `markers.<id>.header_format` でテンプレート名を選択
  (直接テンプレート文字列を書いてもOK)
 
+> [!NOTE]
+> `markers_mitogenome.toml`にデフォルトで設定している`header_format=mifish`はPMiFishパイプラインとMiFishパイプラインのDBに対応するフォーマットになっています。
+
 例:
 ```toml
 [output.header_formats]
@@ -198,6 +201,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `-t/--taxon` | なし | taxid/学名を指定 (学名はTaxonomyで解決) |
 | `--workers` | なし | 抽出処理の並列数 |
 | `--out` | なし | 出力先 (省略時は `Results/db/YYYYMMDD/`) |
+| `--output-prefix` | なし | 出力FASTAファイル名のプレフィックス (default: `taxondbbuilder_`) |
 
 ### 具体例 (設定とコマンドの対応)
 1) `markers_file` に `12s` を定義しておく
@@ -214,7 +218,12 @@ region_patterns = ["12S", "rrnS"]
 
 実行例:
 ```bash
-python3 taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s
+```
+
+ファイル名にプレフィックスを付けたい場合:
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --output-prefix "mifish"
 ```
 
 ### taxid指定
@@ -234,7 +243,7 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 32443 -t 7777 -m 12 -m coi
 
 ### 並列抽出 (ダウンロードと変換の並列化)
 ```bash
-python3 taxondbbuilder.py build -c configs/db.toml -t 8030 -m 12s --workers 2
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 ```
 
 ## 抽出ロジック
