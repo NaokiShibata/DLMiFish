@@ -262,7 +262,7 @@ def load_config(path: Path) -> Dict:
     markers_from_file: Dict[str, Dict] = {}
     if markers_file:
         if not isinstance(markers_file, str):
-            raise typer.BadParameter("markers_file must be a string path.")
+            raise typer.BadParameter("markers.file must be a string path.")
         markers_path = Path(os.path.expandvars(os.path.expanduser(markers_file)))
         candidates: List[Path] = []
         if markers_path.is_absolute():
@@ -701,7 +701,7 @@ def list_markers(
     config: Path = typer.Option(..., "--config", "-c", help="Path to TOML config file."),
 ) -> None:
     """
-    List marker IDs and aliases from the config (including markers_file).
+    List marker IDs and aliases from the config (including markers.file).
     """
     cfg = load_config(config)
     markers = cfg.get("markers", {})

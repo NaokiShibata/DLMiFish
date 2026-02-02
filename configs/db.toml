@@ -11,9 +11,6 @@ use_history = true
 # delay_sec overrides default rate-limit delay.
 # delay_sec = 0.34
 
-# Marker definitions are loaded from an external file.
-markers_file = "configs/markers_mitogenome.toml"
-
 # Output header format
 [output]
 default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
@@ -27,6 +24,10 @@ mifish_pipeline = "gb|{acc_id}|{organism}"
 [taxon]
 # If true, do not expand descendants in taxon search.
 noexp = false
+
+[markers]
+# Marker definitions are loaded from an external file.
+file = "configs/markers_mitogenome.toml"
 
 # Optional filters. If unset, no filtering is applied.
 [filters]

@@ -78,19 +78,26 @@ retmode = "text"
 per_query = 100
 use_history = true
 
-markers_file = "configs/markers_mitogenome.toml"
-
 [output]
 default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
 
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
 verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
+mifish_pipeline = "gb|{acc_id}|{organism}"
 
 [taxon]
 noexp = false
 
-# markers は外部ファイルで定義します (例: configs/markers_mitogenome.toml)。
+[markers]
+# 外部ファイルを参照 (必須)
+file = "configs/markers_mitogenome.toml"
+
+# 必要ならここに追記して外部定義を上書きできます
+# [markers."mygene"]
+# aliases = ["mygene", "mg"]
+# phrases = ["MyGene"]
+# region_patterns = ["MyGene"]
 
 [filters]
 # フィルタ無しがデフォルト。必要な場合だけ指定してください。
@@ -113,21 +120,30 @@ noexp = false
 `region_patterns` 未指定の場合は、`phrases/terms` から**リテラル**として自動生成します。
 抽出はGenBankのfeature注釈に依存するため、目的の領域が出ない場合は `region_patterns` と `feature_types/feature_fields` を調整してください。
 
-### markers_file について
-- `markers_file` でマーカー定義を外部TOMLへ分離できます。
+### markers.file について
+- `[markers].file` でマーカー定義を外部TOMLへ分離できます。
 - 外部定義は `[markers]` テーブルを持つ必要があります。
+- `db.toml` 側にも `[markers]` セクションが必要です（`file` のみでもOK）。
+- トップレベルの `markers_file` はサポートしていません。
+- `file` のパス解決は以下の順です:  
+  1) 絶対パス  
+  2) `db.toml` のある場所からの相対  
+  3) 実行ディレクトリからの相対  
+  4) `taxondbbuilder.py` のある場所からの相対
+- `db.toml` 側に書いた `[markers.<id>]` は外部ファイル定義を**上書き**します。
 
 ## 設定ガイド
 このツールの設定は「検索 (NCBIクエリ)」と「抽出 (GenBank feature注釈)」を分けて考えると整理しやすいです。
 
 ### 設定ファイルの役割
-- `db.toml` は「**共通設定** (NCBI / 出力 / filters / markers_file)」を持ちます。
-- `markers_file` は「**マーカー定義**」だけを持ちます ([markers] テーブル)。
+- `db.toml` は「**共通設定** (NCBI / 出力 / filters / markers.file)」を持ちます。
+- `markers` 外部ファイルは「**マーカー定義**」だけを持ちます ([markers] テーブル)。
 - これにより、用途ごとにマーカー定義を差し替える運用ができます。
+- `[markers]` セクションは必須で、`file` 指定とインライン定義を併用できます。
 
 ### 1. 最小構成 (必須)
 - `ncbi` セクション: `email` / `api_key` / `db` / `rettype` など
-- `markers_file`: マーカー定義ファイルへのパス
+- `[markers]` セクション: `file` もしくはインライン定義
 - `output`: FASTAヘッダーの形式
 
 ### 2. マーカー定義の考え方
@@ -172,21 +188,41 @@ feature_fields = ["gene", "product", "note", "standard_name"]
  (直接テンプレート文字列を書いてもOK)
 
 > [!NOTE]
-> `markers_mitogenome.toml`にデフォルトで設定している`header_format=mifish`はPMiFishパイプラインとMiFishパイプラインのDBに対応するフォーマットになっています。
+> `markers_mitogenome.toml`にデフォルトで設定している`header_format=mifish_pipeline`はPMiFishパイプラインとMiFishパイプラインのDBに対応するフォーマットになっています。
 
 例:
 ```toml
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
-mifish = "gb|{acc_id}|{organism}"
+mifish_pipeline = "gb|{acc_id}|{organism}"
 
 [markers."12s"]
-header_format = "mifish"
+header_format = "mifish_pipeline"
 ```
+
+#### FASTAヘッダーで使える変数
+| 変数 | 出典 | 意味 |
+| --- | --- | --- |
+| `{acc}` | GenBank レコード | accession (record.id) |
+| `{acc_id}` | 内部生成 | 出力用 accession。重複配列がある場合は `_dupN` 付与 |
+| `{organism}` | GenBank レコード | `ORGANISM` のサニタイズ済み文字列 |
+| `{organism_raw}` | GenBank レコード | `ORGANISM` の生文字列 |
+| `{marker}` | 設定/内部 | マーカーIDのサニタイズ済み文字列 |
+| `{marker_raw}` | 設定/内部 | マーカーIDの生文字列 |
+| `{label}` | GenBank feature | `gene/product/note/standard_name` などから一致した値 (サニタイズ済み) |
+| `{label_raw}` | GenBank feature | 一致した値の生文字列 |
+| `{type}` | GenBank feature | feature type (例: `rRNA`, `gene`, `CDS`) のサニタイズ済み |
+| `{type_raw}` | GenBank feature | feature type の生文字列 |
+| `{start}` | GenBank feature | feature の開始位置 (1-based) |
+| `{end}` | GenBank feature | feature の終了位置 |
+| `{loc}` | GenBank feature | `start-end` 形式の位置 |
+| `{strand}` | GenBank feature | strand (`1`, `-1`, もしくは `0`) |
+| `{dup}` | 内部生成 | 重複配列のタグ (`dupN` or 空文字) |
 
 ## 逆引き (よくある目的別)
 ### Q. 目的のマーカー情報が登録されていない
-1) `markers_file` (例: `configs/markers_mitogenome.toml`)に新規マーカーを追加
+1) `markers.file` (例: `configs/markers_mitogenome.toml`)に新規マーカーを追加  
+   もしくは `db.toml` 側の `[markers.<id>]` で追加
 2) `aliases` を付けてCLIから指定できるようにする
 3) `phrases/terms` を検索用に、`region_patterns` を抽出用に設定
 
@@ -209,7 +245,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 - 必要に応じて `[filters]` を追加して絞り込みます。
 
 ### Q. 12S/16S 以外 (ITS/18S など)を使いたい
-- `markers_file` に追加でOKです。
+- `markers.file` に追加でOKです。
   例: `ITS`, `18S`, `28S` は `feature_types = ["rRNA", "gene"]` で定義するケースが多いです。
 
 ## 使い方
@@ -218,8 +254,8 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 
 | コマンド引数 | 参照する設定 | 説明 |
 | --- | --- | --- |
-| `-c/--config` | `db.toml` | 共通設定 (NCBI/出力/filters/markers_file) |
-| `-m/--marker` | `markers_file` 内の `[markers.<id>]` | 使うマーカー定義 (aliases で選択) |
+| `-c/--config` | `db.toml` | 共通設定 (NCBI/出力/filters/markers.file) |
+| `-m/--marker` | `markers.file` / `db.toml` の `[markers.<id>]` | 使うマーカー定義 (aliases で選択) |
 | `-t/--taxon` | なし | taxid/学名を指定 (学名はTaxonomyで解決) |
 | `--workers` | なし | 抽出処理の並列数 |
 | `--out` | なし | 出力先 (省略時は `Results/db/YYYYMMDD/`) |
@@ -229,7 +265,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--resume` | なし | キャッシュを優先して利用 |
 
 ### 具体例 (設定とコマンドの対応)
-1) `markers_file` に `12s` を定義しておく
+1) `markers.file` に `12s` を定義しておく
 2) `-m 12s` を指定 → `markers."12s"` の設定が適用される
 3) `phrases/terms` で検索し、`region_patterns` で抽出する
 
@@ -281,6 +317,11 @@ python3 taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m 12s
 ### 複数 taxon / marker
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 32443 -t 7777 -m 12 -m coi
+```
+
+### マーカー一覧の確認
+```bash
+python3 taxondbbuilder.py list-markers -c configs/db.toml
 ```
 
 ### 並列抽出 (ダウンロードと変換の並列化)
