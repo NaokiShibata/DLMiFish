@@ -2,9 +2,13 @@ import io
 import os
 import re
 import time
+import csv
+import hashlib
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from queue import Queue
+from string import Formatter
 from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -36,6 +40,7 @@ console = Console()
 DEFAULT_FEATURE_TYPES = ["rRNA", "gene", "CDS"]
 DEFAULT_FEATURE_FIELDS = ["gene", "product", "note", "standard_name"]
 DEFAULT_HEADER_FORMAT = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
+FORMATTER = Formatter()
 
 
 def print_header() -> None:
@@ -293,6 +298,31 @@ def load_config(path: Path) -> Dict:
     if "markers" not in data or not data["markers"]:
         raise typer.BadParameter("Missing [markers] section in config.")
 
+    post_prep = data.get("post_prep")
+    if post_prep is not None:
+        if not isinstance(post_prep, dict):
+            raise typer.BadParameter("[post_prep] must be a table (dict).")
+        min_len = post_prep.get("sequence_length_min")
+        max_len = post_prep.get("sequence_length_max")
+        if min_len is not None:
+            try:
+                post_prep["sequence_length_min"] = int(min_len)
+            except (TypeError, ValueError) as exc:
+                raise typer.BadParameter("post_prep.sequence_length_min must be an integer.") from exc
+        if max_len is not None:
+            try:
+                post_prep["sequence_length_max"] = int(max_len)
+            except (TypeError, ValueError) as exc:
+                raise typer.BadParameter("post_prep.sequence_length_max must be an integer.") from exc
+        min_len = post_prep.get("sequence_length_min")
+        max_len = post_prep.get("sequence_length_max")
+        if (min_len is None) != (max_len is None):
+            raise typer.BadParameter(
+                "post_prep.sequence_length_min and post_prep.sequence_length_max must both be set."
+            )
+        if min_len is not None and max_len is not None and min_len > max_len:
+            raise typer.BadParameter("post_prep.sequence_length_min must be <= post_prep.sequence_length_max.")
+
     return data
 
 
@@ -453,6 +483,245 @@ class SafeFormatDict(dict):
 
 def build_header(template: str, values: Dict[str, str]) -> str:
     return template.format_map(SafeFormatDict(values))
+
+
+def template_has_field(template: str, field_name: str) -> bool:
+    for _, parsed_field, _, _ in FORMATTER.parse(template):
+        if parsed_field == field_name:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class HeaderExtractor:
+    pattern: re.Pattern
+    captures_organism: bool
+
+
+def compile_header_extractors(header_formats: Iterable[str]) -> Tuple[List[HeaderExtractor], bool, bool]:
+    extractors: List[HeaderExtractor] = []
+    has_acc_id_template = False
+    has_organism_template = False
+    for template in sorted(set(header_formats)):
+        has_acc_id = template_has_field(template, "acc_id")
+        organism_field = None
+        if template_has_field(template, "organism_raw"):
+            organism_field = "organism_raw"
+        elif template_has_field(template, "organism"):
+            organism_field = "organism"
+
+        has_acc_id_template = has_acc_id_template or has_acc_id
+        has_organism_template = has_organism_template or organism_field is not None
+        if not has_acc_id:
+            continue
+
+        parts: List[str] = []
+        seen_acc_id = False
+        seen_organism = False
+        for literal, field, _, _ in FORMATTER.parse(template):
+            parts.append(re.escape(literal))
+            if field is None:
+                continue
+            if field == "acc_id":
+                if not seen_acc_id:
+                    parts.append(r"(?P<acc_id>[A-Za-z0-9._-]+)")
+                    seen_acc_id = True
+                else:
+                    parts.append(r"(?P=acc_id)")
+            elif organism_field and field == organism_field:
+                if not seen_organism:
+                    parts.append(r"(?P<organism_name>.*?)")
+                    seen_organism = True
+                else:
+                    parts.append(r"(?P=organism_name)")
+            else:
+                parts.append(r".*?")
+        if seen_acc_id:
+            extractors.append(
+                HeaderExtractor(
+                    pattern=re.compile("^" + "".join(parts) + "$"),
+                    captures_organism=seen_organism,
+                )
+            )
+    return extractors, has_acc_id_template, has_organism_template
+
+
+def extract_header_fields_from_header(header: str, extractors: List[HeaderExtractor]) -> Tuple[Optional[str], Optional[str]]:
+    for extractor in extractors:
+        match = extractor.pattern.match(header)
+        if not match:
+            continue
+        acc_id = match.groupdict().get("acc_id")
+        if not acc_id:
+            continue
+        organism_name = match.groupdict().get("organism_name")
+        if organism_name is not None:
+            organism_name = organism_name.strip()
+        return acc_id, organism_name or None
+    return None, None
+
+
+def apply_post_prep_length_filter(
+    fasta_path: Path,
+    min_len: int,
+    max_len: int,
+) -> Dict[str, int]:
+    before_count = 0
+    after_count = 0
+    tmp_path = fasta_path.with_suffix(fasta_path.suffix + ".postprep.tmp")
+    try:
+        with fasta_path.open("r", encoding="utf-8") as in_f, tmp_path.open("w", encoding="utf-8") as out_f:
+            for record in SeqIO.parse(in_f, "fasta"):
+                before_count += 1
+                seq_len = len(record.seq)
+                if seq_len < min_len or seq_len > max_len:
+                    continue
+                SeqIO.write(record, out_f, "fasta")
+                after_count += 1
+        tmp_path.replace(fasta_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return {
+        "before": before_count,
+        "after": after_count,
+        "removed": before_count - after_count,
+    }
+
+
+def write_duplicate_acc_reports_csv(
+    fasta_path: Path,
+    header_formats: Iterable[str],
+) -> Tuple[Optional[Path], Optional[Path], Dict[str, int], Optional[str]]:
+    extractors, has_acc_id_template, has_organism_template = compile_header_extractors(header_formats)
+    if not has_acc_id_template:
+        return None, None, {}, "selected header format does not include {acc_id}"
+    if not has_organism_template:
+        return None, None, {}, "selected header format does not include {organism_raw} or {organism}"
+    if not extractors:
+        return None, None, {}, "could not compile header extractor"
+    if not any(extractor.captures_organism for extractor in extractors):
+        return None, None, {}, "selected header format does not include {organism_raw} or {organism} alongside {acc_id}"
+
+    seq_groups: Dict[str, List[Dict[str, str]]] = {}
+    total_records = 0
+    parsed_records = 0
+    unparsed_records = 0
+    with fasta_path.open("r", encoding="utf-8") as fasta_f:
+        for record in SeqIO.parse(fasta_f, "fasta"):
+            total_records += 1
+            header = str(record.description).strip()
+            acc_id, organism_name = extract_header_fields_from_header(header, extractors)
+            if not acc_id or not organism_name:
+                unparsed_records += 1
+                continue
+            parsed_records += 1
+            accession = re.sub(r"_dup\d+$", "", acc_id)
+            seq = str(record.seq).upper()
+            seq_groups.setdefault(seq, []).append(
+                {
+                    "acc_id": acc_id,
+                    "accession": accession,
+                    "organism_name": organism_name,
+                    "header": header,
+                }
+            )
+
+    records_path = fasta_path.with_suffix(fasta_path.suffix + ".duplicate_acc.records.csv")
+    groups_path = fasta_path.with_suffix(fasta_path.suffix + ".duplicate_acc.groups.csv")
+    duplicate_groups = 0
+    duplicate_records = 0
+    cross_organism_groups = 0
+    with records_path.open("w", newline="", encoding="utf-8") as records_f, groups_path.open(
+        "w", newline="", encoding="utf-8"
+    ) as groups_f:
+        records_writer = csv.DictWriter(
+            records_f,
+            fieldnames=[
+                "group_id",
+                "sequence_hash",
+                "sequence_length",
+                "records_in_group",
+                "unique_accessions",
+                "unique_organisms",
+                "cross_organism_duplicate",
+                "acc_id",
+                "accession",
+                "organism_name",
+                "header",
+            ],
+        )
+        records_writer.writeheader()
+        groups_writer = csv.DictWriter(
+            groups_f,
+            fieldnames=[
+                "group_id",
+                "sequence_hash",
+                "sequence_length",
+                "records_in_group",
+                "unique_accessions",
+                "unique_organisms",
+                "cross_organism_duplicate",
+                "accessions",
+                "organism_names",
+            ],
+        )
+        groups_writer.writeheader()
+
+        group_id = 0
+        for seq, entries in sorted(seq_groups.items(), key=lambda item: len(item[1]), reverse=True):
+            if len(entries) < 2:
+                continue
+            unique_accessions = sorted({item["accession"] for item in entries})
+            if len(unique_accessions) < 2:
+                continue
+            unique_organisms = sorted({item["organism_name"] for item in entries})
+            is_cross_organism = len(unique_organisms) > 1
+            group_id += 1
+            duplicate_groups += 1
+            duplicate_records += len(entries)
+            if is_cross_organism:
+                cross_organism_groups += 1
+            seq_hash = hashlib.sha1(seq.encode("utf-8")).hexdigest()
+            groups_writer.writerow(
+                {
+                    "group_id": group_id,
+                    "sequence_hash": seq_hash,
+                    "sequence_length": len(seq),
+                    "records_in_group": len(entries),
+                    "unique_accessions": len(unique_accessions),
+                    "unique_organisms": len(unique_organisms),
+                    "cross_organism_duplicate": str(is_cross_organism).lower(),
+                    "accessions": ";".join(unique_accessions),
+                    "organism_names": ";".join(unique_organisms),
+                }
+            )
+            for item in entries:
+                records_writer.writerow(
+                    {
+                        "group_id": group_id,
+                        "sequence_hash": seq_hash,
+                        "sequence_length": len(seq),
+                        "records_in_group": len(entries),
+                        "unique_accessions": len(unique_accessions),
+                        "unique_organisms": len(unique_organisms),
+                        "cross_organism_duplicate": str(is_cross_organism).lower(),
+                        "acc_id": item["acc_id"],
+                        "accession": item["accession"],
+                        "organism_name": item["organism_name"],
+                        "header": item["header"],
+                    }
+                )
+
+    stats = {
+        "total_records": total_records,
+        "parsed_records": parsed_records,
+        "unparsed_records": unparsed_records,
+        "duplicate_groups": duplicate_groups,
+        "duplicate_records": duplicate_records,
+        "cross_organism_groups": cross_organism_groups,
+    }
+    return records_path, groups_path, stats, None
 
 
 def feature_texts(feature, fields: List[str]) -> List[str]:
@@ -776,6 +1045,11 @@ def build(
         "--output-prefix",
         help="Prefix added to output FASTA filename.",
     ),
+    post_prep: bool = typer.Option(
+        False,
+        "--post-prep",
+        help="Apply [post_prep] FASTA processing after extraction.",
+    ),
 ):
     """
     Build a FASTA database by downloading GenBank records and extracting features.
@@ -792,6 +1066,7 @@ def build(
     ncbi_cfg = cfg.get("ncbi", {})
     filters_cfg = cfg.get("filters", {})
     output_cfg = cfg.get("output", {})
+    post_prep_cfg = cfg.get("post_prep") or {}
     taxon_noexp = bool(cfg.get("taxon", {}).get("noexp", False))
 
     setup_entrez(ncbi_cfg)
@@ -800,6 +1075,7 @@ def build(
     marker_keys = [resolve_marker_key(m, marker_map) for m in marker]
     marker_query = build_marker_query(marker_keys, marker_map)
     output_prefix = output_prefix.strip()
+    selected_header_formats: List[str] = []
     marker_rules = []
     for key in marker_keys:
         cfg_m = marker_map[key]
@@ -831,6 +1107,20 @@ def build(
                 "header_format": resolve_header_format(cfg_m, output_cfg),
             }
         )
+        selected_header_formats.append(marker_rules[-1]["header_format"])
+
+    if post_prep:
+        if not post_prep_cfg:
+            raise typer.BadParameter("--post-prep requires [post_prep] in config.")
+        if "sequence_length_min" not in post_prep_cfg or "sequence_length_max" not in post_prep_cfg:
+            raise typer.BadParameter(
+                "--post-prep requires post_prep.sequence_length_min and post_prep.sequence_length_max."
+            )
+        post_min = int(post_prep_cfg["sequence_length_min"])
+        post_max = int(post_prep_cfg["sequence_length_max"])
+    else:
+        post_min = None
+        post_max = None
 
     taxids: List[str] = []
     warnings: List[str] = []
@@ -859,6 +1149,10 @@ def build(
     log_lines.append(f"# dump_gb: {dump_gb}" if dump_gb else "# dump_gb: none")
     log_lines.append(f"# from_gb: {from_gb}" if from_gb else "# from_gb: none")
     log_lines.append(f"# resume: {resume}")
+    log_lines.append(f"# post_prep: {post_prep}")
+    if post_prep:
+        log_lines.append(f"# post_prep.sequence_length_min: {post_min}")
+        log_lines.append(f"# post_prep.sequence_length_max: {post_max}")
     if warnings:
         log_lines.append("# warnings:")
         log_lines.extend([f"# - {w}" for w in warnings])
@@ -974,6 +1268,41 @@ def build(
                 t.join()
             if errors:
                 raise errors[0]
+
+    duplicate_records_report_path: Optional[Path] = None
+    duplicate_groups_report_path: Optional[Path] = None
+    if post_prep:
+        before_post_prep = counters["kept_records"]
+        length_stats = apply_post_prep_length_filter(out_path, post_min, post_max)
+        counters["kept_records"] = length_stats["after"]
+        log_lines.append(f"# kept records before post_prep: {before_post_prep}")
+        log_lines.append(
+            "# post_prep length filter:"
+            f" before={length_stats['before']} after={length_stats['after']} removed={length_stats['removed']}"
+        )
+        (
+            duplicate_records_report_path,
+            duplicate_groups_report_path,
+            dup_stats,
+            dup_reason,
+        ) = write_duplicate_acc_reports_csv(out_path, selected_header_formats)
+        if dup_reason:
+            log_lines.append(f"# post_prep duplicate_acc_report: skipped ({dup_reason})")
+            console.print(f"[yellow]post_prep:[/yellow] duplicate ACC report skipped ({dup_reason}).")
+        else:
+            log_lines.append(
+                "# post_prep duplicate_acc_report:"
+                f" total={dup_stats['total_records']} parsed={dup_stats['parsed_records']}"
+                f" unparsed={dup_stats['unparsed_records']} groups={dup_stats['duplicate_groups']}"
+                f" records={dup_stats['duplicate_records']}"
+                f" cross_organism_groups={dup_stats['cross_organism_groups']}"
+            )
+            if duplicate_records_report_path:
+                log_lines.append(f"# post_prep duplicate_acc_records_csv: {duplicate_records_report_path}")
+                console.print(f"post_prep duplicate ACC records CSV: {duplicate_records_report_path}")
+            if duplicate_groups_report_path:
+                log_lines.append(f"# post_prep duplicate_acc_groups_csv: {duplicate_groups_report_path}")
+                console.print(f"post_prep duplicate ACC groups CSV: {duplicate_groups_report_path}")
 
     log_lines.append(f"# total records: {counters['total_records']}")
     log_lines.append(f"# matched records: {counters['matched_records']}")

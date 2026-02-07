@@ -42,3 +42,10 @@ file = "configs/markers_mitogenome.toml"
 # all_fields_include = ["12S"]
 # all_fields_exclude = ["WGS"]
 # raw = "complete[prop]"
+
+# Optional post-processing for the generated FASTA.
+[post_prep]
+# Enable with CLI option: --post-prep
+# sequence_length_min and sequence_length_max must both be set.
+# sequence_length_min = 120
+# sequence_length_max = 300
