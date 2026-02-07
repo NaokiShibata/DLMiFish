@@ -115,9 +115,13 @@ file = "configs/markers_mitogenome.toml"
 
 [post_prep]
 # build 実行時に --post-prep を指定すると適用されます
-# sequence_length_min と sequence_length_max はセットで指定してください
+# パラメータは有効化するカテゴリに応じて指定します
+# - length_filter: sequence_length_min + sequence_length_max
+# - primer_trim: primer_file + primer_set
 # sequence_length_min = 120
 # sequence_length_max = 300
+# primer_file = "configs/primers.toml"
+# primer_set = "mifish_12s"
 ```
 
 ### 検索・抽出の考え方
@@ -271,7 +275,8 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--dump-gb` | なし | GenBankチャンクを保存 (キャッシュ) |
 | `--from-gb` | なし | 保存済みGenBankチャンクから抽出 |
 | `--resume` | なし | キャッシュを優先して利用 |
-| `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理 (長さフィルタ + 重複ACCレポートCSV: 詳細/集約) |
+| `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理を有効化 |
+| `--post-prep-step` | `db.toml` の `[post_prep]` | 実行する後処理カテゴリを選択 (`primer_trim` / `length_filter` / `duplicate_report`) |
 
 ### 具体例 (設定とコマンドの対応)
 1) `markers.file` に `12s` を定義しておく
@@ -311,9 +316,16 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Re
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
 ```
 
-post-prep を有効化 (長さフィルタ + 重複ACCレポート):
+post-prep を有効化 (primer trim + 長さフィルタ + 重複ACCレポート):
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --post-prep
+```
+
+post-prep のカテゴリを明示指定 (primer trim + 重複ACCレポートのみ):
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --post-prep \
+  --post-prep-step primer_trim \
+  --post-prep-step duplicate_report
 ```
 
 キャッシュは `Results/gb/.cache/` に保存されます。
@@ -361,11 +373,28 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 - 実行ログ: 出力FASTAと同名の `.log`
 
 `--post-prep` 指定時:
-- `[post_prep].sequence_length_min/max` による長さフィルタを適用
+- デフォルトでは、設定が存在するカテゴリを実行
+  - `primer_trim` (primer設定がある場合)
+  - `length_filter` (length設定がある場合)
+  - `duplicate_report` (常に実行)
+- `--post-prep-step` を指定した場合、指定カテゴリのみ実行
+- `[post_prep].primer_file + primer_set` 指定時、`primer_trim` カテゴリで primer trim を適用
+  - 5'末端: `forward` 候補
+  - 3'末端: `reverse` の逆相補候補
+  - 逆向き配列も考慮し、`reverse`(5') + `forward`逆相補(3') の組み合わせも判定
+  - IUPAC塩基 (`R`, `Y`, `N` など) を利用可能
+- `[post_prep].sequence_length_min/max` 指定時、`length_filter` カテゴリで配列長フィルタを適用
 - FASTAヘッダーテンプレートに `{acc_id}` と `{organism_raw}` (または `{organism}`) が含まれる場合、同一配列の重複情報を以下に出力
 - `*.fasta.duplicate_acc.records.csv` (1レコード=1行の詳細)
 - `*.fasta.duplicate_acc.groups.csv` (重複グループの集約。`cross_organism_duplicate` を含む)
 - 条件を満たさないヘッダーテンプレートの場合、重複ACCレポートCSVはスキップされ、理由はコンソールと `.log` に出力
+
+primer list ファイル例 (`configs/primers.toml`):
+```toml
+[primer_sets.mifish_12s]
+forward = ["GTCGGTAAAACTCGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+```
 
 `*.fasta.duplicate_acc.records.csv` の主な列:
 - `group_id`
