@@ -1,11 +1,124 @@
-# Primer definitions used by [post_prep] primer trimming.
+# Primer definitions for [post_prep] primer trimming.
+# Source: https://edna-blog.com/metaba-primer/ (accessed 2026-02-08)
 # forward: primer candidates expected at 5' end
 # reverse: primer candidates expected at 3' end (reverse-complement side is matched automatically)
 
-[primer_sets.mifish_12s]
-forward = ["GTCGGTAAAACTCGTGCCAGC"]
-reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
-
+# Fish (Osteichthyes, Chondrichthyes, Cyclostomata)
 [primer_sets.mifish_u]
 forward = ["GTCGGTAAAACTCGTGCCAGC"]
 reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+
+[primer_sets.mifish_ev2]
+forward = ["RGTTGGTAAATCTCGTGCCAGC"]
+reverse = ["GCATAGTGGGGTATCTAATCCTAGTTTG"]
+
+[primer_sets.mifish_u2]
+forward = ["GCCGGTAAAACTCGTGCCAGC"]
+reverse = ["CATAGGAGGGTGTCTAATCCCCGTTTG"]
+
+[primer_sets.mifish_l]
+forward = ["GCTGGTAAACCTCGTGCCAGC"]
+reverse = ["CATAGCGGGGTATCTAATCCCGGTTTG"]
+
+# Decapoda
+[primer_sets.mideca]
+forward = ["GGACGATAAGACCCTATAAA"]
+reverse = ["ACGCTGTTATCCCTAAAGT"]
+
+# Mammalia
+[primer_sets.mimammal_u]
+forward = ["GGGTTGGTAAATTTCGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+
+[primer_sets.mimammal_e]
+forward = ["GGACTGGTCAATTTCGTGCCAGC"]
+reverse = ["CATAGTGAGGTATCTAATCTCAGTTTG"]
+
+[primer_sets.mimammal_b]
+forward = ["GGGTTGGTTAATTTCGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+
+# Birds
+[primer_sets.mibird_u]
+forward = ["GGGTTGGTAAATCTTGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+
+[primer_sets.birt]
+forward = ["YGGTAAATCYTGTGCCAGC"]
+reverse = ["AAGTCCTTAGAGTTTYAAGCGTT"]
+
+# Aquatic insects
+[primer_sets.lco1490_hco2198]
+forward = ["GGTCAACAAATCATAAAGATATTGG"]
+reverse = ["TAAACTTCAGGGTGACCAAAAAATCA"]
+
+[primer_sets.fwhf2_eptdr2n]
+forward = ["GGDACWGGWTGAACWGTWTAYCCHCC"]
+reverse = ["CAAACAAATARDGGTATTCGDTY"]
+
+[primer_sets.mtinsects_16s]
+forward = ["GGACGAGAAGACCCTWTAGA"]
+reverse = ["ATCCAACATCGAGGTCGCAA"]
+
+# Hynobius
+[primer_sets.hynobius_12s]
+forward = ["TTAATAAAAACGGCCTAAAGCGTG"]
+reverse = ["TCAATTATAGAACAGGCTCCTCTAGGG"]
+
+# Anguilla
+[primer_sets.mieel]
+forward = ["CTTACAGCAAACCTGACAGCAG"]
+reverse = ["TTGGTGTGCCATTATACGTTTTCTTG"]
+
+# Amphibia
+[primer_sets.amph_16s]
+forward = ["ACGAGAAGACCCYRTGGARCTT"]
+reverse = ["ATCCAACATCGAGGTCGTAA"]
+
+# Ophiuroidea / Echinodermata
+[primer_sets.oph1_16s]
+forward = ["GTACTCTGACYGTGCAAAGGTAGC"]
+reverse = ["TAGGGACAACACGTCCCRCT"]
+
+[primer_sets.oph2_16s]
+forward = ["GGACGAGAAGACCCYRTWGAG"]
+reverse = ["CAACATCGAGGTCGCAAAC"]
+
+# Scleractinian
+[primer_sets.scle_12s]
+forward = ["CCAGCMGACGCGGTRANACTTA"]
+reverse = ["AAWTTGACGACGGCCATGC"]
+
+# Octocorals
+[primer_sets.anth_28s_edna]
+forward = ["CGTGAAACCGYTRRAAGGG"]
+reverse = ["TTGGTCCGTGTTTCAAGACG"]
+
+# Cetacean
+[primer_sets.uceta]
+forward = ["GACACTGAAAATGTCTAGATGG"]
+reverse = ["TYAATCGTATGACCGCGGTG"]
+
+# Ayu haplotype
+[primer_sets.paadlp]
+forward = ["CCGGTTGCATATATGGACCTATTAC"]
+reverse = ["GCTATTRTAGTCTGGTAACGCAAG"]
+
+# Odontobutis haplotype
+[primer_sets.odon_12s]
+forward = ["TATACGAGAGGCTCAAGCTGAT"]
+reverse = ["GTTTTACCAGTTTTGCTTACTATGG"]
+
+# Nipponocypris / Zacco
+[primer_sets.nipzac_d_loop]
+forward = ["ACTATCTTCTGATAGTAACCTATATGGTA"]
+reverse = ["GTGTCCCTGATTCTATCATGAATAG"]
+
+# Barbatula
+[primer_sets.bto_cytb]
+forward = ["TGAAACTTCGGATCACTCCTGG"]
+reverse = ["TACTAGGGCAAGCTCATTCTAGC"]
+
+[primer_sets.bto_nd5]
+forward = ["GTCACCAACTGGCACTGGA"]
+reverse = ["CATCTTTTGAAAAGAAGCCTGCAAG"]
