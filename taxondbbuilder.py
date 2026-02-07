@@ -6,6 +6,7 @@ import csv
 import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from queue import Queue
 from string import Formatter
@@ -13,7 +14,9 @@ from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import typer
+from Bio.Data.IUPACData import ambiguous_dna_values
 from Bio import Entrez, SeqIO
+from Bio.Seq import Seq
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -41,6 +44,21 @@ DEFAULT_FEATURE_TYPES = ["rRNA", "gene", "CDS"]
 DEFAULT_FEATURE_FIELDS = ["gene", "product", "note", "standard_name"]
 DEFAULT_HEADER_FORMAT = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
 FORMATTER = Formatter()
+IUPAC_DNA_VALUES = {k.upper(): v.upper() for k, v in ambiguous_dna_values.items()}
+IUPAC_DNA_VALUES["U"] = "T"
+
+
+class PostPrepStep(str, Enum):
+    PRIMER_TRIM = "primer_trim"
+    LENGTH_FILTER = "length_filter"
+    DUPLICATE_REPORT = "duplicate_report"
+
+
+POST_PREP_STEP_ORDER = [
+    PostPrepStep.PRIMER_TRIM.value,
+    PostPrepStep.LENGTH_FILTER.value,
+    PostPrepStep.DUPLICATE_REPORT.value,
+]
 
 
 def print_header() -> None:
@@ -302,6 +320,7 @@ def load_config(path: Path) -> Dict:
     if post_prep is not None:
         if not isinstance(post_prep, dict):
             raise typer.BadParameter("[post_prep] must be a table (dict).")
+
         min_len = post_prep.get("sequence_length_min")
         max_len = post_prep.get("sequence_length_max")
         if min_len is not None:
@@ -322,6 +341,77 @@ def load_config(path: Path) -> Dict:
             )
         if min_len is not None and max_len is not None and min_len > max_len:
             raise typer.BadParameter("post_prep.sequence_length_min must be <= post_prep.sequence_length_max.")
+
+        has_length_filter = min_len is not None and max_len is not None
+
+        primer_file = post_prep.get("primer_file")
+        primer_set = post_prep.get("primer_set")
+        if primer_file is not None:
+            if not isinstance(primer_file, str) or not primer_file.strip():
+                raise typer.BadParameter("post_prep.primer_file must be a non-empty string path.")
+            primer_file = primer_file.strip()
+            post_prep["primer_file"] = primer_file
+        if primer_set is not None:
+            if not isinstance(primer_set, str) or not primer_set.strip():
+                raise typer.BadParameter("post_prep.primer_set must be a non-empty string.")
+            primer_set = primer_set.strip()
+            post_prep["primer_set"] = primer_set
+        if (primer_file is None) != (primer_set is None):
+            raise typer.BadParameter("post_prep.primer_file and post_prep.primer_set must both be set.")
+
+        has_primer_trim = False
+        if primer_file and primer_set:
+            primer_path = Path(os.path.expandvars(os.path.expanduser(primer_file)))
+            candidates: List[Path] = []
+            if primer_path.is_absolute():
+                candidates.append(primer_path)
+            else:
+                candidates.append(path.parent / primer_path)
+                candidates.append(Path.cwd() / primer_path)
+                candidates.append(Path(__file__).resolve().parent / primer_path)
+
+            primer_path = next((p for p in candidates if p.exists()), None)
+            if not primer_path:
+                tried = ", ".join(str(p) for p in candidates)
+                raise typer.BadParameter(f"Primer file not found. Tried: {tried}")
+
+            with primer_path.open("rb") as f:
+                primer_data = tomllib.load(f)
+            primer_sets = primer_data.get("primer_sets")
+            if not isinstance(primer_sets, dict) or not primer_sets:
+                raise typer.BadParameter("Primer file must define a non-empty [primer_sets] section.")
+
+            selected_set = primer_sets.get(primer_set)
+            if not isinstance(selected_set, dict):
+                raise typer.BadParameter(f"Primer set '{primer_set}' was not found in primer file.")
+
+            forward = selected_set.get("forward")
+            reverse = selected_set.get("reverse")
+            if not isinstance(forward, list) or not forward or not all(isinstance(v, str) for v in forward):
+                raise typer.BadParameter(f"primer_sets.{primer_set}.forward must be a non-empty list of strings.")
+            if not isinstance(reverse, list) or not reverse or not all(isinstance(v, str) for v in reverse):
+                raise typer.BadParameter(f"primer_sets.{primer_set}.reverse must be a non-empty list of strings.")
+
+            def normalize_primers(values: List[str], field_name: str) -> List[str]:
+                normalized: List[str] = []
+                for value in values:
+                    primer = value.strip().upper().replace("U", "T")
+                    if not primer:
+                        raise typer.BadParameter(f"primer_sets.{primer_set}.{field_name} cannot contain empty primers.")
+                    invalid = sorted({ch for ch in primer if ch not in IUPAC_DNA_VALUES})
+                    if invalid:
+                        chars = "".join(invalid)
+                        raise typer.BadParameter(
+                            f"primer_sets.{primer_set}.{field_name} contains unsupported IUPAC chars: {chars}"
+                        )
+                    normalized.append(primer)
+                return normalized
+
+            post_prep["_primer_forward"] = normalize_primers(forward, "forward")
+            post_prep["_primer_reverse"] = normalize_primers(reverse, "reverse")
+            post_prep["_primer_file_resolved"] = str(primer_path)
+            post_prep["_primer_set_name"] = primer_set
+            has_primer_trim = True
 
     return data
 
@@ -586,6 +676,156 @@ def apply_post_prep_length_filter(
         "before": before_count,
         "after": after_count,
         "removed": before_count - after_count,
+    }
+
+
+def primer_to_regex(primer: str) -> str:
+    parts: List[str] = []
+    for ch in primer.upper():
+        values = IUPAC_DNA_VALUES.get(ch)
+        if values is None:
+            raise ValueError(f"Unsupported primer base: {ch}")
+        uniq = "".join(sorted(set(values)))
+        if len(uniq) == 1:
+            parts.append(uniq)
+        else:
+            parts.append(f"[{uniq}]")
+    return "".join(parts)
+
+
+def compile_primer_end_patterns(
+    primers: List[str],
+    anchor: str,
+) -> List[Tuple[int, re.Pattern]]:
+    compiled: List[Tuple[int, re.Pattern]] = []
+    for primer in primers:
+        regex = primer_to_regex(primer)
+        if anchor == "start":
+            pat = re.compile("^" + regex, re.IGNORECASE)
+        elif anchor == "end":
+            pat = re.compile(regex + "$", re.IGNORECASE)
+        else:
+            raise ValueError(f"Unknown primer anchor: {anchor}")
+        compiled.append((len(primer), pat))
+    return compiled
+
+
+def matched_prefix_length(seq: str, patterns: List[Tuple[int, re.Pattern]]) -> int:
+    max_len = 0
+    for primer_len, pat in patterns:
+        if pat.match(seq):
+            max_len = max(max_len, primer_len)
+    return max_len
+
+
+def matched_suffix_length(seq: str, patterns: List[Tuple[int, re.Pattern]]) -> int:
+    max_len = 0
+    for primer_len, pat in patterns:
+        if pat.search(seq):
+            max_len = max(max_len, primer_len)
+    return max_len
+
+
+def choose_trim_lengths(
+    seq: str,
+    left_patterns: List[Tuple[int, re.Pattern]],
+    right_patterns: List[Tuple[int, re.Pattern]],
+) -> Tuple[int, int]:
+    left = matched_prefix_length(seq, left_patterns)
+    right = matched_suffix_length(seq, right_patterns)
+    return left, right
+
+
+def apply_post_prep_primer_trim(
+    fasta_path: Path,
+    forward_primers: List[str],
+    reverse_primers: List[str],
+) -> Dict[str, int]:
+    forward_rc = [str(Seq(p).reverse_complement()).upper() for p in forward_primers]
+    reverse_rc = [str(Seq(p).reverse_complement()).upper() for p in reverse_primers]
+
+    canonical_left = compile_primer_end_patterns(forward_primers, anchor="start")
+    canonical_right = compile_primer_end_patterns(reverse_rc, anchor="end")
+    reverse_left = compile_primer_end_patterns(reverse_primers, anchor="start")
+    reverse_right = compile_primer_end_patterns(forward_rc, anchor="end")
+
+    before_count = 0
+    after_count = 0
+    trimmed_both = 0
+    trimmed_left_only = 0
+    trimmed_right_only = 0
+    untrimmed = 0
+    dropped_empty = 0
+    canonical_orientation = 0
+    reverse_orientation = 0
+
+    tmp_path = fasta_path.with_suffix(fasta_path.suffix + ".postprep.primer.tmp")
+    try:
+        with fasta_path.open("r", encoding="utf-8") as in_f, tmp_path.open("w", encoding="utf-8") as out_f:
+            for record in SeqIO.parse(in_f, "fasta"):
+                before_count += 1
+                seq = str(record.seq).upper().replace("U", "T")
+                seq_len = len(seq)
+
+                can_left, can_right = choose_trim_lengths(seq, canonical_left, canonical_right)
+                rev_left, rev_right = choose_trim_lengths(seq, reverse_left, reverse_right)
+
+                can_ends = (1 if can_left else 0) + (1 if can_right else 0)
+                rev_ends = (1 if rev_left else 0) + (1 if rev_right else 0)
+                can_trim = can_left + can_right
+                rev_trim = rev_left + rev_right
+
+                if (can_ends, can_trim) >= (rev_ends, rev_trim):
+                    left_len, right_len = can_left, can_right
+                    chosen_orientation = "canonical"
+                else:
+                    left_len, right_len = rev_left, rev_right
+                    chosen_orientation = "reverse"
+
+                ends_trimmed = (1 if left_len else 0) + (1 if right_len else 0)
+                if ends_trimmed == 0:
+                    untrimmed += 1
+                    trimmed_seq = seq
+                else:
+                    if ends_trimmed == 2:
+                        trimmed_both += 1
+                    elif left_len:
+                        trimmed_left_only += 1
+                    else:
+                        trimmed_right_only += 1
+
+                    if chosen_orientation == "canonical":
+                        canonical_orientation += 1
+                    else:
+                        reverse_orientation += 1
+
+                    right_index = seq_len - right_len if right_len else seq_len
+                    trimmed_seq = seq[left_len:right_index]
+
+                if not trimmed_seq:
+                    dropped_empty += 1
+                    continue
+
+                out_f.write(f">{record.description}\n")
+                out_f.write(f"{trimmed_seq}\n")
+                after_count += 1
+
+        tmp_path.replace(fasta_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    return {
+        "before": before_count,
+        "after": after_count,
+        "removed": before_count - after_count,
+        "trimmed_both": trimmed_both,
+        "trimmed_left_only": trimmed_left_only,
+        "trimmed_right_only": trimmed_right_only,
+        "untrimmed": untrimmed,
+        "dropped_empty": dropped_empty,
+        "canonical_orientation": canonical_orientation,
+        "reverse_orientation": reverse_orientation,
     }
 
 
@@ -1050,6 +1290,14 @@ def build(
         "--post-prep",
         help="Apply [post_prep] FASTA processing after extraction.",
     ),
+    post_prep_step: Optional[List[PostPrepStep]] = typer.Option(
+        None,
+        "--post-prep-step",
+        help=(
+            "Post-prep step(s) to run. Repeat to select multiple. "
+            "Choices: primer_trim, length_filter, duplicate_report."
+        ),
+    ),
 ):
     """
     Build a FASTA database by downloading GenBank records and extracting features.
@@ -1109,18 +1357,55 @@ def build(
         )
         selected_header_formats.append(marker_rules[-1]["header_format"])
 
+    requested_post_prep_steps = [step.value for step in (post_prep_step or [])]
+
     if post_prep:
-        if not post_prep_cfg:
-            raise typer.BadParameter("--post-prep requires [post_prep] in config.")
-        if "sequence_length_min" not in post_prep_cfg or "sequence_length_max" not in post_prep_cfg:
+        has_length_filter = (
+            "sequence_length_min" in post_prep_cfg and "sequence_length_max" in post_prep_cfg
+        )
+        has_primer_trim = (
+            "_primer_forward" in post_prep_cfg and "_primer_reverse" in post_prep_cfg
+        )
+
+        if PostPrepStep.PRIMER_TRIM.value in requested_post_prep_steps and not has_primer_trim:
             raise typer.BadParameter(
-                "--post-prep requires post_prep.sequence_length_min and post_prep.sequence_length_max."
+                "post-prep step 'primer_trim' requires post_prep.primer_file and post_prep.primer_set."
             )
-        post_min = int(post_prep_cfg["sequence_length_min"])
-        post_max = int(post_prep_cfg["sequence_length_max"])
+        if PostPrepStep.LENGTH_FILTER.value in requested_post_prep_steps and not has_length_filter:
+            raise typer.BadParameter(
+                "post-prep step 'length_filter' requires post_prep.sequence_length_min and sequence_length_max."
+            )
+
+        if requested_post_prep_steps:
+            post_prep_steps_run = [
+                step for step in POST_PREP_STEP_ORDER if step in requested_post_prep_steps
+            ]
+        else:
+            post_prep_steps_run = []
+            if has_primer_trim:
+                post_prep_steps_run.append(PostPrepStep.PRIMER_TRIM.value)
+            if has_length_filter:
+                post_prep_steps_run.append(PostPrepStep.LENGTH_FILTER.value)
+            post_prep_steps_run.append(PostPrepStep.DUPLICATE_REPORT.value)
+
+        post_min = int(post_prep_cfg["sequence_length_min"]) if has_length_filter else None
+        post_max = int(post_prep_cfg["sequence_length_max"]) if has_length_filter else None
+        post_primer_forward = list(post_prep_cfg.get("_primer_forward") or [])
+        post_primer_reverse = list(post_prep_cfg.get("_primer_reverse") or [])
+        post_primer_file = post_prep_cfg.get("_primer_file_resolved")
+        post_primer_set = post_prep_cfg.get("_primer_set_name")
     else:
+        if requested_post_prep_steps:
+            raise typer.BadParameter("--post-prep-step requires --post-prep.")
+        has_length_filter = False
+        has_primer_trim = False
+        post_prep_steps_run = []
         post_min = None
         post_max = None
+        post_primer_forward = []
+        post_primer_reverse = []
+        post_primer_file = None
+        post_primer_set = None
 
     taxids: List[str] = []
     warnings: List[str] = []
@@ -1151,8 +1436,16 @@ def build(
     log_lines.append(f"# resume: {resume}")
     log_lines.append(f"# post_prep: {post_prep}")
     if post_prep:
+        steps_text = ", ".join(post_prep_steps_run) if post_prep_steps_run else "none"
+        log_lines.append(f"# post_prep.steps: {steps_text}")
+    if post_prep and has_length_filter:
         log_lines.append(f"# post_prep.sequence_length_min: {post_min}")
         log_lines.append(f"# post_prep.sequence_length_max: {post_max}")
+    if post_prep and has_primer_trim:
+        log_lines.append(f"# post_prep.primer_file: {post_primer_file}")
+        log_lines.append(f"# post_prep.primer_set: {post_primer_set}")
+        log_lines.append(f"# post_prep.primer_forward_count: {len(post_primer_forward)}")
+        log_lines.append(f"# post_prep.primer_reverse_count: {len(post_primer_reverse)}")
     if warnings:
         log_lines.append("# warnings:")
         log_lines.extend([f"# - {w}" for w in warnings])
@@ -1273,36 +1566,61 @@ def build(
     duplicate_groups_report_path: Optional[Path] = None
     if post_prep:
         before_post_prep = counters["kept_records"]
-        length_stats = apply_post_prep_length_filter(out_path, post_min, post_max)
-        counters["kept_records"] = length_stats["after"]
         log_lines.append(f"# kept records before post_prep: {before_post_prep}")
-        log_lines.append(
-            "# post_prep length filter:"
-            f" before={length_stats['before']} after={length_stats['after']} removed={length_stats['removed']}"
-        )
-        (
-            duplicate_records_report_path,
-            duplicate_groups_report_path,
-            dup_stats,
-            dup_reason,
-        ) = write_duplicate_acc_reports_csv(out_path, selected_header_formats)
-        if dup_reason:
-            log_lines.append(f"# post_prep duplicate_acc_report: skipped ({dup_reason})")
-            console.print(f"[yellow]post_prep:[/yellow] duplicate ACC report skipped ({dup_reason}).")
-        else:
-            log_lines.append(
-                "# post_prep duplicate_acc_report:"
-                f" total={dup_stats['total_records']} parsed={dup_stats['parsed_records']}"
-                f" unparsed={dup_stats['unparsed_records']} groups={dup_stats['duplicate_groups']}"
-                f" records={dup_stats['duplicate_records']}"
-                f" cross_organism_groups={dup_stats['cross_organism_groups']}"
+
+        if PostPrepStep.PRIMER_TRIM.value in post_prep_steps_run:
+            primer_stats = apply_post_prep_primer_trim(
+                out_path,
+                post_primer_forward,
+                post_primer_reverse,
             )
-            if duplicate_records_report_path:
-                log_lines.append(f"# post_prep duplicate_acc_records_csv: {duplicate_records_report_path}")
-                console.print(f"post_prep duplicate ACC records CSV: {duplicate_records_report_path}")
-            if duplicate_groups_report_path:
-                log_lines.append(f"# post_prep duplicate_acc_groups_csv: {duplicate_groups_report_path}")
-                console.print(f"post_prep duplicate ACC groups CSV: {duplicate_groups_report_path}")
+            counters["kept_records"] = primer_stats["after"]
+            log_lines.append(
+                "# post_prep primer trim:"
+                f" before={primer_stats['before']} after={primer_stats['after']}"
+                f" removed={primer_stats['removed']} trimmed_both={primer_stats['trimmed_both']}"
+                f" trimmed_left_only={primer_stats['trimmed_left_only']}"
+                f" trimmed_right_only={primer_stats['trimmed_right_only']}"
+                f" untrimmed={primer_stats['untrimmed']}"
+                f" dropped_empty={primer_stats['dropped_empty']}"
+                f" canonical_orientation={primer_stats['canonical_orientation']}"
+                f" reverse_orientation={primer_stats['reverse_orientation']}"
+            )
+
+        if PostPrepStep.LENGTH_FILTER.value in post_prep_steps_run:
+            length_stats = apply_post_prep_length_filter(out_path, post_min, post_max)
+            counters["kept_records"] = length_stats["after"]
+            log_lines.append(
+                "# post_prep length filter:"
+                f" before={length_stats['before']} after={length_stats['after']} removed={length_stats['removed']}"
+            )
+
+        if PostPrepStep.DUPLICATE_REPORT.value in post_prep_steps_run:
+            (
+                duplicate_records_report_path,
+                duplicate_groups_report_path,
+                dup_stats,
+                dup_reason,
+            ) = write_duplicate_acc_reports_csv(out_path, selected_header_formats)
+            if dup_reason:
+                log_lines.append(f"# post_prep duplicate_acc_report: skipped ({dup_reason})")
+                console.print(f"[yellow]post_prep:[/yellow] duplicate ACC report skipped ({dup_reason}).")
+            else:
+                log_lines.append(
+                    "# post_prep duplicate_acc_report:"
+                    f" total={dup_stats['total_records']} parsed={dup_stats['parsed_records']}"
+                    f" unparsed={dup_stats['unparsed_records']} groups={dup_stats['duplicate_groups']}"
+                    f" records={dup_stats['duplicate_records']}"
+                    f" cross_organism_groups={dup_stats['cross_organism_groups']}"
+                )
+                if duplicate_records_report_path:
+                    log_lines.append(f"# post_prep duplicate_acc_records_csv: {duplicate_records_report_path}")
+                    console.print(f"post_prep duplicate ACC records CSV: {duplicate_records_report_path}")
+                if duplicate_groups_report_path:
+                    log_lines.append(f"# post_prep duplicate_acc_groups_csv: {duplicate_groups_report_path}")
+                    console.print(f"post_prep duplicate ACC groups CSV: {duplicate_groups_report_path}")
+        else:
+            log_lines.append("# post_prep duplicate_acc_report: skipped (step disabled)")
 
     log_lines.append(f"# total records: {counters['total_records']}")
     log_lines.append(f"# matched records: {counters['matched_records']}")

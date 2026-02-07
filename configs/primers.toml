@@ -1,0 +1,11 @@
+# Primer definitions used by [post_prep] primer trimming.
+# forward: primer candidates expected at 5' end
+# reverse: primer candidates expected at 3' end (reverse-complement side is matched automatically)
+
+[primer_sets.mifish_12s]
+forward = ["GTCGGTAAAACTCGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
+
+[primer_sets.mifish_u]
+forward = ["GTCGGTAAAACTCGTGCCAGC"]
+reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
