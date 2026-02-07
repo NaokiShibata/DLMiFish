@@ -2,7 +2,7 @@ import io
 import os
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from queue import Queue
 from threading import Event, Lock, Thread
@@ -478,45 +478,79 @@ def match_feature(feature, compiled_patterns: List[re.Pattern], fields: List[str
 
 
 def build_filter_terms(filters: Dict) -> List[str]:
+    def as_str_list(value: object, name: str) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return value
+        raise typer.BadParameter(f"filters.{name} must be a string or list of strings.")
+
+    def as_date_str(value: object, name: str) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (date, datetime)):
+            return value.strftime("%Y/%m/%d")
+        raise typer.BadParameter(f"filters.{name} must be a string or date.")
+
     terms: List[str] = []
+    if filters is None:
+        return terms
+    if not isinstance(filters, dict):
+        raise typer.BadParameter("[filters] must be a table (dict).")
     if not filters:
         return terms
 
-    organelle = filters.get("organelle")
-    if organelle:
-        terms.append(f"{organelle}[filter]")
+    filters_list = as_str_list(filters.get("filter"), "filter")
+    for value in filters_list:
+        terms.append(f"{value}[filter]")
 
-    source = filters.get("source")
-    if source:
-        terms.append(f"{source}[filter]")
+    properties_list = as_str_list(filters.get("properties"), "properties")
+    for value in properties_list:
+        terms.append(f"{value}[prop]")
 
-    length_min = filters.get("length_min")
-    length_max = filters.get("length_max")
+    length_min = filters.get("sequence_length_min")
+    length_max = filters.get("sequence_length_max")
     if length_min is not None or length_max is not None:
-        lmin = int(length_min) if length_min is not None else 0
-        lmax = int(length_max) if length_max is not None else 1000000000
+        try:
+            lmin = int(length_min) if length_min is not None else 0
+            lmax = int(length_max) if length_max is not None else 1000000000
+        except (TypeError, ValueError) as exc:
+            raise typer.BadParameter("filters.sequence_length_min/max must be integers.") from exc
         terms.append(f"{lmin}[SLEN] : {lmax}[SLEN]")
 
-    date_from = filters.get("date_from")
-    date_to = filters.get("date_to")
+    date_from = as_date_str(filters.get("publication_date_from"), "publication_date_from")
+    date_to = as_date_str(filters.get("publication_date_to"), "publication_date_to")
     if date_from or date_to:
         dfrom = date_from or "1800/01/01"
         dto = date_to or "3000/12/31"
         terms.append(f"{dfrom}[PDAT] : {dto}[PDAT]")
 
-    include_keywords = filters.get("include_keywords")
+    date_from = as_date_str(filters.get("modification_date_from"), "modification_date_from")
+    date_to = as_date_str(filters.get("modification_date_to"), "modification_date_to")
+    if date_from or date_to:
+        dfrom = date_from or "1800/01/01"
+        dto = date_to or "3000/12/31"
+        terms.append(f"{dfrom}[MDAT] : {dto}[MDAT]")
+
+    include_keywords = as_str_list(filters.get("all_fields_include"), "all_fields_include")
     if include_keywords:
         inc = [f'"{k}"[All Fields]' for k in include_keywords]
         terms.append("(" + " OR ".join(inc) + ")")
 
-    exclude_keywords = filters.get("exclude_keywords")
+    exclude_keywords = as_str_list(filters.get("all_fields_exclude"), "all_fields_exclude")
     if exclude_keywords:
         exc = [f'"{k}"[All Fields]' for k in exclude_keywords]
         terms.append("NOT (" + " OR ".join(exc) + ")")
 
-    extra = filters.get("extra")
-    if extra:
-        terms.append(str(extra))
+    raw = filters.get("raw")
+    if raw is not None:
+        raw_terms = as_str_list(raw, "raw")
+        for term in raw_terms:
+            terms.append(str(term))
 
     return terms
 
