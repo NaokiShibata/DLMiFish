@@ -54,6 +54,6 @@ file = "configs/markers_mitogenome.toml"
 # primer candidates: `python3 taxondbbuilder.py list-primer-sets -c configs/db.toml`
 # sequence_length_min = 120
 # sequence_length_max = 300
-# primer_file = "configs/primers.toml"
+primer_file = "configs/primers.toml"
 # primer_set = "mifish_12s"
 # primer_set = ["mifish_12s", "mifish_ev2"]

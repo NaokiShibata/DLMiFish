@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import re
 import time
@@ -1208,9 +1209,22 @@ def build_output_path(
     return out_dir / f"{prefix}{taxon_label}__{marker_label}.fasta"
 
 
-def write_log(log_path: Path, lines: List[str]) -> None:
-    with log_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+def setup_run_logger(log_path: Path) -> logging.Logger:
+    logger_name = f"taxondbbuilder.run.{os.getpid()}.{int(time.time() * 1_000_000)}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
+
+
+def close_run_logger(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        handler.flush()
+        handler.close()
+        logger.removeHandler(handler)
 
 
 def resolve_support_file_path(raw_path: str, config_path: Path, label: str) -> Path:
@@ -1538,32 +1552,6 @@ def build(
     if dump_gb:
         dump_gb.mkdir(parents=True, exist_ok=True)
 
-    log_lines = []
-    log_lines.append(f"# started: {datetime.now().isoformat()}")
-    log_lines.append(f"# config: {config}")
-    log_lines.append(f"# taxon input: {taxon}")
-    log_lines.append(f"# taxids: {taxids}")
-    log_lines.append(f"# markers: {marker_keys}")
-    log_lines.append(f"# output_prefix: {output_prefix}")
-    log_lines.append(f"# dump_gb: {dump_gb}" if dump_gb else "# dump_gb: none")
-    log_lines.append(f"# from_gb: {from_gb}" if from_gb else "# from_gb: none")
-    log_lines.append(f"# resume: {resume}")
-    log_lines.append(f"# post_prep: {post_prep}")
-    if post_prep:
-        steps_text = ", ".join(post_prep_steps_run) if post_prep_steps_run else "none"
-        log_lines.append(f"# post_prep.steps: {steps_text}")
-    if post_prep and has_length_filter:
-        log_lines.append(f"# post_prep.sequence_length_min: {post_min}")
-        log_lines.append(f"# post_prep.sequence_length_max: {post_max}")
-    if post_prep and has_primer_trim:
-        log_lines.append(f"# post_prep.primer_file: {post_primer_file}")
-        log_lines.append(f"# post_prep.primer_set: {', '.join(post_primer_set_names)}")
-        log_lines.append(f"# post_prep.primer_forward_count: {len(post_primer_forward)}")
-        log_lines.append(f"# post_prep.primer_reverse_count: {len(post_primer_reverse)}")
-    if warnings:
-        log_lines.append("# warnings:")
-        log_lines.extend([f"# - {w}" for w in warnings])
-
     print_header()
     render_run_table(config, taxids, marker_keys, out_path, filters_cfg, dump_gb, from_gb, resume)
     for w in warnings:
@@ -1596,160 +1584,189 @@ def build(
         disable=not console.is_terminal,
     )
 
-    lock = Lock()
-    log_lines.append(f"# workers: {workers}")
+    run_logger = setup_run_logger(log_path)
+    try:
+        run_logger.info(f"# started: {datetime.now().isoformat()}")
+        run_logger.info(f"# config: {config}")
+        run_logger.info(f"# taxon input: {taxon}")
+        run_logger.info(f"# taxids: {taxids}")
+        run_logger.info(f"# markers: {marker_keys}")
+        run_logger.info(f"# output_prefix: {output_prefix}")
+        run_logger.info(f"# dump_gb: {dump_gb}" if dump_gb else "# dump_gb: none")
+        run_logger.info(f"# from_gb: {from_gb}" if from_gb else "# from_gb: none")
+        run_logger.info(f"# resume: {resume}")
+        run_logger.info(f"# post_prep: {post_prep}")
+        if post_prep:
+            steps_text = ", ".join(post_prep_steps_run) if post_prep_steps_run else "none"
+            run_logger.info(f"# post_prep.steps: {steps_text}")
+        if post_prep and has_length_filter:
+            run_logger.info(f"# post_prep.sequence_length_min: {post_min}")
+            run_logger.info(f"# post_prep.sequence_length_max: {post_max}")
+        if post_prep and has_primer_trim:
+            run_logger.info(f"# post_prep.primer_file: {post_primer_file}")
+            run_logger.info(f"# post_prep.primer_set: {', '.join(post_primer_set_names)}")
+            run_logger.info(f"# post_prep.primer_forward_count: {len(post_primer_forward)}")
+            run_logger.info(f"# post_prep.primer_reverse_count: {len(post_primer_reverse)}")
+        if warnings:
+            run_logger.info("# warnings:")
+            for warning in warnings:
+                run_logger.info(f"# - {warning}")
 
-    with out_path.open("w", encoding="utf-8") as out_f, progress:
-        for taxid in taxids:
-            query = build_query(taxid, marker_query, filters_cfg, taxon_noexp)
-            log_lines.append(f"# query taxid={taxid}: {query}")
-            delay_sec = default_delay(ncbi_cfg)
-            if from_gb:
-                data_iter = iter_genbank_files(from_gb, taxid)
-                count = None
-                log_lines.append(f"# query count taxid={taxid}: from-gb")
-            else:
-                count, data_iter = fetch_genbank(
-                    query,
-                    ncbi_cfg,
-                    delay_sec,
-                    dump_dir=dump_gb,
-                    resume=resume,
-                    taxid=taxid,
-                )
-                log_lines.append(f"# query count taxid={taxid}: {count}")
-                if count == 0:
-                    console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
-                    continue
+        lock = Lock()
+        run_logger.info(f"# workers: {workers}")
 
-            task_id = progress.add_task(f"taxid {taxid}", total=count)
-            if workers < 1:
-                raise typer.BadParameter("--workers must be >= 1.")
+        with out_path.open("w", encoding="utf-8") as out_f, progress:
+            for taxid in taxids:
+                query = build_query(taxid, marker_query, filters_cfg, taxon_noexp)
+                run_logger.info(f"# query taxid={taxid}: {query}")
+                delay_sec = default_delay(ncbi_cfg)
+                if from_gb:
+                    data_iter = iter_genbank_files(from_gb, taxid)
+                    count = None
+                    run_logger.info(f"# query count taxid={taxid}: from-gb")
+                else:
+                    count, data_iter = fetch_genbank(
+                        query,
+                        ncbi_cfg,
+                        delay_sec,
+                        dump_dir=dump_gb,
+                        resume=resume,
+                        taxid=taxid,
+                    )
+                    run_logger.info(f"# query count taxid={taxid}: {count}")
+                    if count == 0:
+                        console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
+                        continue
 
-            q: Queue = Queue(maxsize=max(1, workers * 2))
-            stop_event = Event()
-            errors: List[Exception] = []
+                task_id = progress.add_task(f"taxid {taxid}", total=count)
+                if workers < 1:
+                    raise typer.BadParameter("--workers must be >= 1.")
 
-            def worker() -> None:
-                while True:
-                    item = q.get()
-                    if item is None:
-                        q.task_done()
+                q: Queue = Queue(maxsize=max(1, workers * 2))
+                stop_event = Event()
+                errors: List[Exception] = []
+
+                def worker() -> None:
+                    while True:
+                        item = q.get()
+                        if item is None:
+                            q.task_done()
+                            break
+                        try:
+                            start, chunk = item
+                            process_genbank_chunk(
+                                chunk,
+                                marker_rules,
+                                acc_to_seqs,
+                                out_f,
+                                counters,
+                                dup_accessions,
+                                lock,
+                                progress,
+                                task_id,
+                                taxid,
+                                dump_gb,
+                            )
+                        except Exception as exc:
+                            errors.append(exc)
+                            stop_event.set()
+                        finally:
+                            q.task_done()
+
+                threads = [Thread(target=worker, daemon=True) for _ in range(workers)]
+                for t in threads:
+                    t.start()
+
+                for start, chunk in data_iter:
+                    if stop_event.is_set():
                         break
-                    try:
-                        start, chunk = item
-                        process_genbank_chunk(
-                            chunk,
-                            marker_rules,
-                            acc_to_seqs,
-                            out_f,
-                            counters,
-                            dup_accessions,
-                            lock,
-                            progress,
-                            task_id,
-                            taxid,
-                            dump_gb,
-                        )
-                    except Exception as exc:
-                        errors.append(exc)
-                        stop_event.set()
-                    finally:
-                        q.task_done()
+                    if not chunk:
+                        continue
+                    q.put((start, chunk))
 
-            threads = [Thread(target=worker, daemon=True) for _ in range(workers)]
-            for t in threads:
-                t.start()
+                for _ in threads:
+                    q.put(None)
+                q.join()
+                for t in threads:
+                    t.join()
+                if errors:
+                    raise errors[0]
 
-            for start, chunk in data_iter:
-                if stop_event.is_set():
-                    break
-                if not chunk:
-                    continue
-                q.put((start, chunk))
+        duplicate_records_report_path: Optional[Path] = None
+        duplicate_groups_report_path: Optional[Path] = None
+        if post_prep:
+            before_post_prep = counters["kept_records"]
+            run_logger.info(f"# kept records before post_prep: {before_post_prep}")
 
-            for _ in threads:
-                q.put(None)
-            q.join()
-            for t in threads:
-                t.join()
-            if errors:
-                raise errors[0]
-
-    duplicate_records_report_path: Optional[Path] = None
-    duplicate_groups_report_path: Optional[Path] = None
-    if post_prep:
-        before_post_prep = counters["kept_records"]
-        log_lines.append(f"# kept records before post_prep: {before_post_prep}")
-
-        if PostPrepStep.PRIMER_TRIM.value in post_prep_steps_run:
-            primer_stats = apply_post_prep_primer_trim(
-                out_path,
-                post_primer_forward,
-                post_primer_reverse,
-            )
-            counters["kept_records"] = primer_stats["after"]
-            log_lines.append(
-                "# post_prep primer trim:"
-                f" before={primer_stats['before']} after={primer_stats['after']}"
-                f" removed={primer_stats['removed']} trimmed_both={primer_stats['trimmed_both']}"
-                f" trimmed_left_only={primer_stats['trimmed_left_only']}"
-                f" trimmed_right_only={primer_stats['trimmed_right_only']}"
-                f" untrimmed={primer_stats['untrimmed']}"
-                f" dropped_empty={primer_stats['dropped_empty']}"
-                f" canonical_orientation={primer_stats['canonical_orientation']}"
-                f" reverse_orientation={primer_stats['reverse_orientation']}"
-            )
-
-        if PostPrepStep.LENGTH_FILTER.value in post_prep_steps_run:
-            length_stats = apply_post_prep_length_filter(out_path, post_min, post_max)
-            counters["kept_records"] = length_stats["after"]
-            log_lines.append(
-                "# post_prep length filter:"
-                f" before={length_stats['before']} after={length_stats['after']} removed={length_stats['removed']}"
-            )
-
-        if PostPrepStep.DUPLICATE_REPORT.value in post_prep_steps_run:
-            (
-                duplicate_records_report_path,
-                duplicate_groups_report_path,
-                dup_stats,
-                dup_reason,
-            ) = write_duplicate_acc_reports_csv(out_path, selected_header_formats)
-            if dup_reason:
-                log_lines.append(f"# post_prep duplicate_acc_report: skipped ({dup_reason})")
-                console.print(f"[yellow]post_prep:[/yellow] duplicate ACC report skipped ({dup_reason}).")
-            else:
-                log_lines.append(
-                    "# post_prep duplicate_acc_report:"
-                    f" total={dup_stats['total_records']} parsed={dup_stats['parsed_records']}"
-                    f" unparsed={dup_stats['unparsed_records']} groups={dup_stats['duplicate_groups']}"
-                    f" records={dup_stats['duplicate_records']}"
-                    f" cross_organism_groups={dup_stats['cross_organism_groups']}"
+            if PostPrepStep.PRIMER_TRIM.value in post_prep_steps_run:
+                primer_stats = apply_post_prep_primer_trim(
+                    out_path,
+                    post_primer_forward,
+                    post_primer_reverse,
                 )
-                if duplicate_records_report_path:
-                    log_lines.append(f"# post_prep duplicate_acc_records_csv: {duplicate_records_report_path}")
-                    console.print(f"post_prep duplicate ACC records CSV: {duplicate_records_report_path}")
-                if duplicate_groups_report_path:
-                    log_lines.append(f"# post_prep duplicate_acc_groups_csv: {duplicate_groups_report_path}")
-                    console.print(f"post_prep duplicate ACC groups CSV: {duplicate_groups_report_path}")
-        else:
-            log_lines.append("# post_prep duplicate_acc_report: skipped (step disabled)")
+                counters["kept_records"] = primer_stats["after"]
+                run_logger.info(
+                    "# post_prep primer trim:"
+                    f" before={primer_stats['before']} after={primer_stats['after']}"
+                    f" removed={primer_stats['removed']} trimmed_both={primer_stats['trimmed_both']}"
+                    f" trimmed_left_only={primer_stats['trimmed_left_only']}"
+                    f" trimmed_right_only={primer_stats['trimmed_right_only']}"
+                    f" untrimmed={primer_stats['untrimmed']}"
+                    f" dropped_empty={primer_stats['dropped_empty']}"
+                    f" canonical_orientation={primer_stats['canonical_orientation']}"
+                    f" reverse_orientation={primer_stats['reverse_orientation']}"
+                )
 
-    log_lines.append(f"# total records: {counters['total_records']}")
-    log_lines.append(f"# matched records: {counters['matched_records']}")
-    log_lines.append(f"# matched features: {counters['matched_features']}")
-    log_lines.append(f"# kept records: {counters['kept_records']}")
-    log_lines.append(f"# skipped duplicates (same accession+sequence): {counters['skipped_same']}")
-    log_lines.append(f"# kept duplicates (same accession, different sequence): {counters['duplicated_diff']}")
-    if dup_accessions:
-        log_lines.append("# duplicate accessions with different sequences:")
-        for acc, count in sorted(dup_accessions.items()):
-            log_lines.append(f"# - {acc}: {count} sequences")
-    log_lines.append(f"# output: {out_path}")
-    log_lines.append(f"# finished: {datetime.now().isoformat()}")
+            if PostPrepStep.LENGTH_FILTER.value in post_prep_steps_run:
+                length_stats = apply_post_prep_length_filter(out_path, post_min, post_max)
+                counters["kept_records"] = length_stats["after"]
+                run_logger.info(
+                    "# post_prep length filter:"
+                    f" before={length_stats['before']} after={length_stats['after']} removed={length_stats['removed']}"
+                )
 
-    write_log(log_path, log_lines)
+            if PostPrepStep.DUPLICATE_REPORT.value in post_prep_steps_run:
+                (
+                    duplicate_records_report_path,
+                    duplicate_groups_report_path,
+                    dup_stats,
+                    dup_reason,
+                ) = write_duplicate_acc_reports_csv(out_path, selected_header_formats)
+                if dup_reason:
+                    run_logger.info(f"# post_prep duplicate_acc_report: skipped ({dup_reason})")
+                    console.print(f"[yellow]post_prep:[/yellow] duplicate ACC report skipped ({dup_reason}).")
+                else:
+                    run_logger.info(
+                        "# post_prep duplicate_acc_report:"
+                        f" total={dup_stats['total_records']} parsed={dup_stats['parsed_records']}"
+                        f" unparsed={dup_stats['unparsed_records']} groups={dup_stats['duplicate_groups']}"
+                        f" records={dup_stats['duplicate_records']}"
+                        f" cross_organism_groups={dup_stats['cross_organism_groups']}"
+                    )
+                    if duplicate_records_report_path:
+                        run_logger.info(f"# post_prep duplicate_acc_records_csv: {duplicate_records_report_path}")
+                        console.print(f"post_prep duplicate ACC records CSV: {duplicate_records_report_path}")
+                    if duplicate_groups_report_path:
+                        run_logger.info(f"# post_prep duplicate_acc_groups_csv: {duplicate_groups_report_path}")
+                        console.print(f"post_prep duplicate ACC groups CSV: {duplicate_groups_report_path}")
+            else:
+                run_logger.info("# post_prep duplicate_acc_report: skipped (step disabled)")
+
+        run_logger.info(f"# total records: {counters['total_records']}")
+        run_logger.info(f"# matched records: {counters['matched_records']}")
+        run_logger.info(f"# matched features: {counters['matched_features']}")
+        run_logger.info(f"# kept records: {counters['kept_records']}")
+        run_logger.info(f"# skipped duplicates (same accession+sequence): {counters['skipped_same']}")
+        run_logger.info(f"# kept duplicates (same accession, different sequence): {counters['duplicated_diff']}")
+        if dup_accessions:
+            run_logger.info("# duplicate accessions with different sequences:")
+            for acc, count in sorted(dup_accessions.items()):
+                run_logger.info(f"# - {acc}: {count} sequences")
+        run_logger.info(f"# output: {out_path}")
+        run_logger.info(f"# finished: {datetime.now().isoformat()}")
+    finally:
+        close_run_logger(run_logger)
+
     render_result_table(
         counters["total_records"],
         counters["matched_records"],
