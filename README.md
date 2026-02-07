@@ -101,15 +101,17 @@ file = "configs/markers_mitogenome.toml"
 
 [filters]
 # フィルタ無しがデフォルト。必要な場合だけ指定してください。
-# organelle = "mitochondrion"
-# length_min = 120
-# length_max = 30000
-# source = "ddbj_embl_genbank"
-# date_from = "1990/01/01"
-# date_to = "2025/12/31"
-# include_keywords = ["12S"]
-# exclude_keywords = ["WGS"]
-# extra = "complete[prop]"
+# filter = ["mitochondrion"]
+# properties = ["PROPERTY_TERM"]
+# sequence_length_min = 120
+# sequence_length_max = 30000
+# publication_date_from = "1990/01/01"
+# publication_date_to = "2025/12/31"
+# modification_date_from = "2024/01/01"
+# modification_date_to = "2026/12/31"
+# all_fields_include = ["12S"]
+# all_fields_exclude = ["WGS"]
+# raw = "complete[prop]"
 ```
 
 ### 検索・抽出の考え方
@@ -358,6 +360,15 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 
 ## フィルタについて
 フィルタは**指定なしを受け付けます**。必要な場合のみTOMLの `[filters]` に追加してください。
+`[filters]` は NCBI Nucleotide の Filtering 項目に合わせています (Advanced Search の index list を参照)。
+
+- `filter`: NCBI "Filter" 項目の語彙。文字列 or 文字列配列 → `{term}[filter]`
+- `properties`: NCBI "Properties" 項目の語彙。文字列 or 文字列配列 → `{term}[prop]`
+- `sequence_length_min`, `sequence_length_max`: `{min}[SLEN] : {max}[SLEN]`
+- `publication_date_from`, `publication_date_to`: `{from}[PDAT] : {to}[PDAT]`
+- `modification_date_from`, `modification_date_to`: `{from}[MDAT] : {to}[MDAT]`
+- `all_fields_include`, `all_fields_exclude` (文字列 or 文字列配列): `"..."[All Fields]` を OR / NOT で合成
+- `raw`: 生クエリ文字列 (配列も可) をそのまま追加
 
 ## Legacy
 旧パイプラインは削除済みです。現行方針では**DB用FASTA生成のみ**を対象とします。

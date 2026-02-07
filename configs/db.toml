@@ -31,12 +31,14 @@ file = "configs/markers_mitogenome.toml"
 
 # Optional filters. If unset, no filtering is applied.
 [filters]
-organelle = "mitochondrion"
-# length_min = 120
-# length_max = 30000
-# source = "ddbj_embl_genbank"
-# date_from = "1990/01/01"
-# date_to = "2025/12/31"
-# include_keywords = ["12S"]
-# exclude_keywords = ["WGS"]
-# extra = "complete[prop]"
+# filter = ["mitochondrion","ddbj_embl_genbank"]
+# properties = ["biomol_genomic"]
+# sequence_length_min = 120
+# sequence_length_max = 30000
+# publication_date_from = "1990/01/01"
+# publication_date_to = "2025/12/31"
+# modification_date_from = "2024/01/01"
+# modification_date_to = "2026/12/31"
+# all_fields_include = ["12S"]
+# all_fields_exclude = ["WGS"]
+# raw = "complete[prop]"
