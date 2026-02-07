@@ -122,6 +122,7 @@ file = "configs/markers_mitogenome.toml"
 # sequence_length_max = 300
 # primer_file = "configs/primers.toml"
 # primer_set = "mifish_12s"
+# primer_set = ["mifish_12s", "mifish_ev2"]
 ```
 
 ### 検索・抽出の考え方
@@ -277,6 +278,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--resume` | なし | キャッシュを優先して利用 |
 | `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理を有効化 |
 | `--post-prep-step` | `db.toml` の `[post_prep]` | 実行する後処理カテゴリを選択 (`primer_trim` / `length_filter` / `duplicate_report`) |
+| `--post-prep-primer-set` | `[post_prep].primer_file` | primer_trim で使う primer_set をCLIから指定 (複数可・config上書き) |
 
 ### 具体例 (設定とコマンドの対応)
 1) `markers.file` に `12s` を定義しておく
@@ -326,6 +328,19 @@ post-prep のカテゴリを明示指定 (primer trim + 重複ACCレポートの
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --post-prep \
   --post-prep-step primer_trim \
   --post-prep-step duplicate_report
+```
+
+primer_set を複数指定して primer_trim を実行 (config の primer_set を上書き):
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --post-prep \
+  --post-prep-primer-set mifish_12s \
+  --post-prep-primer-set mifish_ev2 \
+  --post-prep-step primer_trim
+```
+
+primer_set の候補を一覧表示:
+```bash
+python3 taxondbbuilder.py list-primer-sets -c configs/db.toml
 ```
 
 キャッシュは `Results/gb/.cache/` に保存されます。
@@ -379,6 +394,8 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
   - `duplicate_report` (常に実行)
 - `--post-prep-step` を指定した場合、指定カテゴリのみ実行
 - `[post_prep].primer_file + primer_set` 指定時、`primer_trim` カテゴリで primer trim を適用
+- `primer_set` は文字列または文字列配列で指定可能
+- `--post-prep-primer-set` を使うと、実行時に primer_set を上書き可能 (複数指定可)
   - 5'末端: `forward` 候補
   - 3'末端: `reverse` の逆相補候補
   - 逆向き配列も考慮し、`reverse`(5') + `forward`逆相補(3') の組み合わせも判定
