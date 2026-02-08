@@ -139,6 +139,7 @@ def process_genbank_chunk(
     task_id: int,
     taxid: str,
     dump_gb_dir: Optional[Path],
+    emitted_records: List[Dict[str, str]],
 ) -> None:
     handle = io.StringIO(chunk)
     for record in SeqIO.parse(handle, "genbank"):
@@ -246,6 +247,14 @@ def process_genbank_chunk(
                 out_f.write(f">{header}\n")
                 out_f.write(f"{seq}\n")
                 counters["kept_records"] += 1
+                emitted_records.append(
+                    {
+                        "acc_id": acc_id,
+                        "accession": acc,
+                        "organism_name": str(organism),
+                        "header": header,
+                    }
+                )
         if record_matched:
             with lock:
                 counters["matched_records"] += 1
@@ -326,20 +335,16 @@ def load_config(path: Path) -> Dict:
         max_len = post_prep.get("sequence_length_max")
         if min_len is not None:
             try:
-                post_prep["sequence_length_min"] = int(min_len)
+                min_len = int(min_len)
+                post_prep["sequence_length_min"] = min_len
             except (TypeError, ValueError) as exc:
                 raise typer.BadParameter("post_prep.sequence_length_min must be an integer.") from exc
         if max_len is not None:
             try:
-                post_prep["sequence_length_max"] = int(max_len)
+                max_len = int(max_len)
+                post_prep["sequence_length_max"] = max_len
             except (TypeError, ValueError) as exc:
                 raise typer.BadParameter("post_prep.sequence_length_max must be an integer.") from exc
-        min_len = post_prep.get("sequence_length_min")
-        max_len = post_prep.get("sequence_length_max")
-        if (min_len is None) != (max_len is None):
-            raise typer.BadParameter(
-                "post_prep.sequence_length_min and post_prep.sequence_length_max must both be set."
-            )
         if min_len is not None and max_len is not None and min_len > max_len:
             raise typer.BadParameter("post_prep.sequence_length_min must be <= post_prep.sequence_length_max.")
 
@@ -628,8 +633,8 @@ def extract_header_fields_from_header(header: str, extractors: List[HeaderExtrac
 
 def apply_post_prep_length_filter(
     fasta_path: Path,
-    min_len: int,
-    max_len: int,
+    min_len: Optional[int],
+    max_len: Optional[int],
 ) -> Dict[str, int]:
     before_count = 0
     after_count = 0
@@ -639,7 +644,9 @@ def apply_post_prep_length_filter(
             for record in SeqIO.parse(in_f, "fasta"):
                 before_count += 1
                 seq_len = len(record.seq)
-                if seq_len < min_len or seq_len > max_len:
+                if min_len is not None and seq_len < min_len:
+                    continue
+                if max_len is not None and seq_len > max_len:
                     continue
                 SeqIO.write(record, out_f, "fasta")
                 after_count += 1
@@ -937,6 +944,71 @@ def write_duplicate_acc_reports_csv(
         "cross_organism_groups": cross_organism_groups,
     }
     return records_path, groups_path, stats, None
+
+
+def write_acc_organism_mapping_csv(
+    fasta_path: Path,
+    emitted_records: List[Dict[str, str]],
+) -> Tuple[Path, Dict[str, int]]:
+    mapping_path = fasta_path.with_suffix(fasta_path.suffix + ".acc_organism.csv")
+    records_by_header: Dict[str, List[Dict[str, str]]] = {}
+    for row in emitted_records:
+        header = row.get("header", "")
+        records_by_header.setdefault(header, []).append(row)
+
+    offsets: Dict[str, int] = {}
+    total_records = 0
+    mapped_records = 0
+    unmapped_records = 0
+    unique_accessions = set()
+    unique_organisms = set()
+    mapped_rows: List[Dict[str, str]] = []
+    with fasta_path.open("r", encoding="utf-8") as fasta_f:
+        for record in SeqIO.parse(fasta_f, "fasta"):
+            total_records += 1
+            header = str(record.description).strip()
+            rows = records_by_header.get(header)
+            idx = offsets.get(header, 0)
+            if not rows or idx >= len(rows):
+                unmapped_records += 1
+                continue
+            row = rows[idx]
+            offsets[header] = idx + 1
+            mapped_records += 1
+            unique_accessions.add(row["accession"])
+            unique_organisms.add(row["organism_name"])
+            mapped_rows.append(
+                {
+                    "acc_id": row["acc_id"],
+                    "accession": row["accession"],
+                    "organism_name": row["organism_name"],
+                    "header": header,
+                }
+            )
+
+    mapped_rows.sort(key=lambda row: (row["acc_id"], row["accession"], row["organism_name"], row["header"]))
+
+    with mapping_path.open("w", newline="", encoding="utf-8") as out_f:
+        writer = csv.DictWriter(
+            out_f,
+            fieldnames=["acc_id", "accession", "organism_name", "header"],
+        )
+        writer.writeheader()
+        writer.writerows(mapped_rows)
+
+    unused_records = 0
+    for header, rows in records_by_header.items():
+        unused_records += max(0, len(rows) - offsets.get(header, 0))
+
+    stats = {
+        "total_records": total_records,
+        "mapped_records": mapped_records,
+        "unmapped_records": unmapped_records,
+        "unused_records": unused_records,
+        "unique_accessions": len(unique_accessions),
+        "unique_organisms": len(unique_organisms),
+    }
+    return mapping_path, stats
 
 
 def feature_texts(feature, fields: List[str]) -> List[str]:
@@ -1470,9 +1542,9 @@ def build(
             requested_primer_sets.append(name)
 
     if post_prep:
-        has_length_filter = (
-            "sequence_length_min" in post_prep_cfg and "sequence_length_max" in post_prep_cfg
-        )
+        post_min = post_prep_cfg.get("sequence_length_min")
+        post_max = post_prep_cfg.get("sequence_length_max")
+        has_length_filter = post_min is not None or post_max is not None
         post_primer_forward = list(post_prep_cfg.get("_primer_forward") or [])
         post_primer_reverse = list(post_prep_cfg.get("_primer_reverse") or [])
         post_primer_file = post_prep_cfg.get("_primer_file_resolved") or post_prep_cfg.get("primer_file")
@@ -1505,7 +1577,7 @@ def build(
             )
         if PostPrepStep.LENGTH_FILTER.value in requested_post_prep_steps and not has_length_filter:
             raise typer.BadParameter(
-                "post-prep step 'length_filter' requires post_prep.sequence_length_min and sequence_length_max."
+                "post-prep step 'length_filter' requires post_prep.sequence_length_min or post_prep.sequence_length_max."
             )
 
         if requested_post_prep_steps:
@@ -1520,8 +1592,8 @@ def build(
                 post_prep_steps_run.append(PostPrepStep.LENGTH_FILTER.value)
             post_prep_steps_run.append(PostPrepStep.DUPLICATE_REPORT.value)
 
-        post_min = int(post_prep_cfg["sequence_length_min"]) if has_length_filter else None
-        post_max = int(post_prep_cfg["sequence_length_max"]) if has_length_filter else None
+        post_min = int(post_min) if post_min is not None else None
+        post_max = int(post_max) if post_max is not None else None
     else:
         if requested_post_prep_steps or requested_primer_sets:
             raise typer.BadParameter("--post-prep-step/--post-prep-primer-set requires --post-prep.")
@@ -1573,6 +1645,7 @@ def build(
         "duplicated_diff": 0,
     }
     dup_accessions: Dict[str, int] = {}
+    emitted_records: List[Dict[str, str]] = []
 
     progress = Progress(
         SpinnerColumn(),
@@ -1600,8 +1673,10 @@ def build(
             steps_text = ", ".join(post_prep_steps_run) if post_prep_steps_run else "none"
             run_logger.info(f"# post_prep.steps: {steps_text}")
         if post_prep and has_length_filter:
-            run_logger.info(f"# post_prep.sequence_length_min: {post_min}")
-            run_logger.info(f"# post_prep.sequence_length_max: {post_max}")
+            if post_min is not None:
+                run_logger.info(f"# post_prep.sequence_length_min: {post_min}")
+            if post_max is not None:
+                run_logger.info(f"# post_prep.sequence_length_max: {post_max}")
         if post_prep and has_primer_trim:
             run_logger.info(f"# post_prep.primer_file: {post_primer_file}")
             run_logger.info(f"# post_prep.primer_set: {', '.join(post_primer_set_names)}")
@@ -1666,6 +1741,7 @@ def build(
                                 task_id,
                                 taxid,
                                 dump_gb,
+                                emitted_records,
                             )
                         except Exception as exc:
                             errors.append(exc)
@@ -1752,6 +1828,17 @@ def build(
             else:
                 run_logger.info("# post_prep duplicate_acc_report: skipped (step disabled)")
 
+        acc_species_map_path, acc_species_stats = write_acc_organism_mapping_csv(out_path, emitted_records)
+        run_logger.info(
+            "# acc_organism_map:"
+            f" total={acc_species_stats['total_records']} mapped={acc_species_stats['mapped_records']}"
+            f" unmapped={acc_species_stats['unmapped_records']}"
+            f" unused_source_records={acc_species_stats['unused_records']}"
+            f" unique_accessions={acc_species_stats['unique_accessions']}"
+            f" unique_organisms={acc_species_stats['unique_organisms']}"
+        )
+        run_logger.info(f"# acc_organism_map_csv: {acc_species_map_path}")
+
         run_logger.info(f"# total records: {counters['total_records']}")
         run_logger.info(f"# matched records: {counters['matched_records']}")
         run_logger.info(f"# matched features: {counters['matched_features']}")
@@ -1780,6 +1867,12 @@ def build(
     if dup_accessions:
         console.print(
             "[yellow]WARNING:[/yellow] duplicate accessions with different sequences were kept. See log for details."
+        )
+    console.print(f"ACC-organism mapping CSV: {acc_species_map_path}")
+    if acc_species_stats["unmapped_records"] > 0:
+        console.print(
+            "[yellow]WARNING:[/yellow] Some final FASTA records could not be mapped to source ACC/organism. "
+            "See .log for details."
         )
 
 

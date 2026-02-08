@@ -116,7 +116,7 @@ file = "configs/markers_mitogenome.toml"
 [post_prep]
 # build 実行時に --post-prep を指定すると適用されます
 # パラメータは有効化するカテゴリに応じて指定します
-# - length_filter: sequence_length_min + sequence_length_max
+# - length_filter: sequence_length_min または sequence_length_max
 # - primer_trim: primer_file + primer_set
 # sequence_length_min = 120
 # sequence_length_max = 300
@@ -386,6 +386,7 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 - 出力先: `Results/db/YYYYMMDD/`
 - ファイル名: `taxid{ID}__{marker}.fasta` (複数指定時は `multi_taxon` / `multi_marker`)
 - 実行ログ: 出力FASTAと同名の `.log`
+- ACCと生物種名の対応表: `*.fasta.acc_organism.csv` (`acc_id, accession, organism_name, header`)
 
 `--post-prep` 指定時:
 - デフォルトでは、設定が存在するカテゴリを実行

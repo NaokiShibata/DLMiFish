@@ -49,7 +49,7 @@ file = "configs/markers_mitogenome.toml"
 # Runtime step selection example:
 # --post-prep-step primer_trim --post-prep-step duplicate_report
 # Parameters are required only for enabled steps:
-# - length_filter: sequence_length_min + sequence_length_max
+# - length_filter: sequence_length_min or sequence_length_max
 # - primer_trim: primer_file + primer_set
 # primer candidates: `python3 taxondbbuilder.py list-primer-sets -c configs/db.toml`
 # sequence_length_min = 120
