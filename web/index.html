@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TaxonDBBuilder Browser Hybrid Runner</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <h1>TaxonDBBuilder Browser Runner</h1>
+      <p>Pyodide + WebWorker + Entrez Bridge でブラウザ実行</p>
+    </header>
+
+    <section class="panel">
+      <h2>Input Files</h2>
+      <p class="hint">
+        <code>configs/</code> や <code>Results/gb/</code> を含むプロジェクトフォルダを選択してください。
+      </p>
+      <label class="field">
+        <span>Project Folder</span>
+        <input id="projectFiles" type="file" webkitdirectory directory multiple />
+      </label>
+      <label class="field">
+        <span>Config Path (relative)</span>
+        <input id="configPath" type="text" value="configs/db.toml" />
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Build Options</h2>
+      <div class="grid">
+        <label class="field">
+          <span>Taxon (comma/newline separated)</span>
+          <textarea id="taxa" rows="3">117570</textarea>
+        </label>
+        <label class="field">
+          <span>Marker (comma/newline separated)</span>
+          <textarea id="markers" rows="3">12s</textarea>
+        </label>
+      </div>
+      <div class="grid">
+        <label class="field">
+          <span>Remote Entrez API</span>
+          <input id="remoteEntrezApi" type="text" value="http://127.0.0.1:8765" />
+        </label>
+        <label class="field">
+          <span>Workers</span>
+          <input id="workers" type="number" min="1" value="2" />
+        </label>
+      </div>
+      <div class="grid">
+        <label class="field">
+          <span>Output FASTA Path (relative)</span>
+          <input id="outPath" type="text" value="Results/db/browser_output.fasta" />
+        </label>
+        <label class="field">
+          <span>Output Prefix</span>
+          <input id="outputPrefix" type="text" value="taxondbbuilder_" />
+        </label>
+      </div>
+      <div class="grid">
+        <label class="field">
+          <span>Dump GB Path (optional, relative)</span>
+          <input id="dumpGbPath" type="text" value="" placeholder="Results/gb" />
+        </label>
+        <label class="field">
+          <span>From GB Path (optional, relative)</span>
+          <input id="fromGbPath" type="text" value="" placeholder="Results/gb" />
+        </label>
+      </div>
+
+      <div class="checks">
+        <label><input id="resume" type="checkbox" /> Resume</label>
+        <label><input id="dryRun" type="checkbox" /> Dry Run</label>
+        <label><input id="postPrep" type="checkbox" /> Post Prep</label>
+      </div>
+
+      <div class="checks">
+        <span>Post Prep Steps:</span>
+        <label><input id="stepPrimerTrim" type="checkbox" /> primer_trim</label>
+        <label><input id="stepLengthFilter" type="checkbox" /> length_filter</label>
+        <label><input id="stepDuplicateReport" type="checkbox" checked /> duplicate_report</label>
+      </div>
+
+      <label class="field">
+        <span>Post Prep Primer Sets (comma/newline separated)</span>
+        <textarea id="postPrepPrimerSets" rows="2"></textarea>
+      </label>
+
+      <div class="actions">
+        <button id="runBtn" type="button">Run Build</button>
+        <span id="status" class="status">Worker not initialized</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Logs</h2>
+      <pre id="logs" class="logs"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Downloads</h2>
+      <ul id="downloads" class="downloads"></ul>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

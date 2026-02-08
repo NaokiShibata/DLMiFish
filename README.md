@@ -334,6 +334,21 @@ EntrezブリッジAPI (`serve-entrez-bridge`) の主なエンドポイント:
 - `POST /v1/genbank/esearch` (`db/term/retstart/retmax/usehistory` を指定)
 - `POST /v1/genbank/efetch` (`id` または `webenv/query_key + retstart/retmax` を指定)
 
+ブラウザ実行プロトタイプ (`web/`):
+```bash
+# 1) Entrezブリッジを起動 (別ターミナル)
+python3 taxondbbuilder.py serve-entrez-bridge --host 127.0.0.1 --port 8765
+
+# 2) リポジトリルートを静的配信
+python3 -m http.server 8000
+
+# 3) ブラウザで開く
+# http://127.0.0.1:8000/web/
+```
+- ブラウザ側は `Pyodide + WebWorker` で実行されます。
+- UIでプロジェクトフォルダをアップロードし、`Config Path` と build オプションを指定して実行します。
+- 出力 (`.fasta`, `.log`, `.csv`) はダウンロードリンクとして表示されます。
+
 post-prep を有効化 (primer trim + 長さフィルタ + 重複ACCレポート):
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --post-prep

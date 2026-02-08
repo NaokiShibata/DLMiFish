@@ -1248,6 +1248,27 @@ def fetch_genbank_remote(
         if path:
             path.write_text(data, encoding="utf-8")
 
+    def fetch_chunk_by_ids(start: int) -> Optional[str]:
+        search_payload = {
+            "db": db,
+            "term": query,
+            "retstart": start,
+            "retmax": per_query,
+            "usehistory": False,
+        }
+        search_result = _http_post_json(remote_entrez_api, "/v1/genbank/esearch", search_payload)
+        ids = search_result.get("id_list") or []
+        if not ids:
+            return None
+        fetch_payload = {
+            "db": db,
+            "rettype": rettype,
+            "retmode": retmode,
+            "id": ",".join([str(x) for x in ids]),
+        }
+        fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
+        return str(fetch_result.get("data") or "")
+
     def gen() -> Iterable[Tuple[int, str]]:
         if use_history and webenv and query_key:
             for start in range(start_at, count, per_query):
@@ -1264,8 +1285,16 @@ def fetch_genbank_remote(
                     "webenv": webenv,
                     "query_key": query_key,
                 }
-                fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
-                data = str(fetch_result.get("data") or "")
+                try:
+                    fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
+                    data = str(fetch_result.get("data") or "")
+                except typer.BadParameter as exc:
+                    if "HTTP 400" not in str(exc):
+                        raise
+                    fallback = fetch_chunk_by_ids(start)
+                    if fallback is None:
+                        continue
+                    data = fallback
                 if cache_root:
                     save_cached(start, data)
                 yield start, data
@@ -1277,25 +1306,9 @@ def fetch_genbank_remote(
             if cached is not None:
                 yield start, cached
                 continue
-            search_payload = {
-                "db": db,
-                "term": query,
-                "retstart": start,
-                "retmax": per_query,
-                "usehistory": False,
-            }
-            search_result = _http_post_json(remote_entrez_api, "/v1/genbank/esearch", search_payload)
-            ids = search_result.get("id_list") or []
-            if not ids:
+            data = fetch_chunk_by_ids(start)
+            if data is None:
                 continue
-            fetch_payload = {
-                "db": db,
-                "rettype": rettype,
-                "retmode": retmode,
-                "id": ",".join([str(x) for x in ids]),
-            }
-            fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
-            data = str(fetch_result.get("data") or "")
             if cache_root:
                 save_cached(start, data)
             yield start, data
@@ -1352,6 +1365,26 @@ def fetch_genbank(
         if path:
             path.write_text(data, encoding="utf-8")
 
+    def fetch_chunk_by_ids(start: int) -> Optional[str]:
+        search_handle = Entrez.esearch(
+            db=db,
+            term=query,
+            retstart=start,
+            retmax=per_query,
+            usehistory="n",
+        )
+        search_record = Entrez.read(search_handle)
+        ids = search_record.get("IdList", [])
+        if not ids:
+            return None
+        fetch_handle = Entrez.efetch(
+            db=db,
+            rettype=rettype,
+            retmode=retmode,
+            id=",".join(ids),
+        )
+        return fetch_handle.read()
+
     def gen() -> Iterable[Tuple[int, str]]:
         if use_history and webenv and query_key:
             for start in range(start_at, count, per_query):
@@ -1359,16 +1392,24 @@ def fetch_genbank(
                 if cached is not None:
                     yield start, cached
                     continue
-                fetch_handle = Entrez.efetch(
-                    db=db,
-                    rettype=rettype,
-                    retmode=retmode,
-                    retstart=start,
-                    retmax=per_query,
-                    webenv=webenv,
-                    query_key=query_key,
-                )
-                data = fetch_handle.read()
+                try:
+                    fetch_handle = Entrez.efetch(
+                        db=db,
+                        rettype=rettype,
+                        retmode=retmode,
+                        retstart=start,
+                        retmax=per_query,
+                        webenv=webenv,
+                        query_key=query_key,
+                    )
+                    data = fetch_handle.read()
+                except HTTPError as exc:
+                    if exc.code != HTTPStatus.BAD_REQUEST:
+                        raise
+                    fallback = fetch_chunk_by_ids(start)
+                    if fallback is None:
+                        continue
+                    data = fallback
                 if cache_root:
                     save_cached(start, data)
                 yield start, data
@@ -1380,24 +1421,9 @@ def fetch_genbank(
             if cached is not None:
                 yield start, cached
                 continue
-            search_handle = Entrez.esearch(
-                db=db,
-                term=query,
-                retstart=start,
-                retmax=per_query,
-                usehistory="n",
-            )
-            search_record = Entrez.read(search_handle)
-            ids = search_record.get("IdList", [])
-            if not ids:
+            data = fetch_chunk_by_ids(start)
+            if data is None:
                 continue
-            fetch_handle = Entrez.efetch(
-                db=db,
-                rettype=rettype,
-                retmode=retmode,
-                id=",".join(ids),
-            )
-            data = fetch_handle.read()
             if cache_root:
                 save_cached(start, data)
             yield start, data
