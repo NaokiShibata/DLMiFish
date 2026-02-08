@@ -1,0 +1,631 @@
+:root {
+  --bg-top: #e8f4ff;
+  --bg-bottom: #f3f9ff;
+  --panel: #fafdff;
+  --panel-strong: #ffffff;
+  --ink: #274157;
+  --muted: #7590a5;
+  --line: #d7e8f6;
+  --primary: #25adff;
+  --primary-strong: #118ae3;
+  --danger: #c22c35;
+  --shadow: 0 12px 26px rgba(66, 119, 159, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "M PLUS Rounded 1c", "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(560px 330px at 12% 7%, rgba(148, 210, 255, 0.28) 0%, rgba(148, 210, 255, 0) 100%),
+    radial-gradient(620px 360px at 87% 10%, rgba(182, 229, 255, 0.24) 0%, rgba(182, 229, 255, 0) 100%),
+    linear-gradient(170deg, var(--bg-top) 0%, var(--bg-bottom) 67%, #f7fcff 100%);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 22px;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: 290px minmax(0, 1fr);
+}
+
+.side-pane {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, #f4faff 0%, #edf6ff 100%);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.app-header h1 {
+  font-size: 31px;
+  line-height: 1.08;
+}
+
+.sub {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tabs {
+  display: grid;
+  gap: 8px;
+}
+
+.tab {
+  border: 1px solid var(--line);
+  background: #f8fcff;
+  color: var(--ink);
+  text-align: left;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: 120ms ease;
+}
+
+.tab:disabled {
+  opacity: 0.7;
+  color: #95acbd;
+  cursor: default;
+}
+
+.tab.active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(130deg, #3bb8ff 0%, #1d95ef 100%);
+}
+
+.side-note {
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.side-note h2 {
+  font-size: 15px;
+}
+
+.side-note p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.config-import {
+  gap: 10px;
+}
+
+.config-import button {
+  width: 100%;
+}
+
+.loaded-db-path {
+  font-size: 11px;
+  color: #7f97aa;
+  word-break: break-all;
+  border: 1px solid #d8e8f6;
+  border-radius: 9px;
+  padding: 6px 8px;
+  background: #f9fcff;
+}
+
+.content-pane {
+  display: grid;
+  border: 1px solid #d9e9f7;
+  background:
+    radial-gradient(680px 220px at 52% 0%, rgba(177, 223, 255, 0.2) 0%, rgba(177, 223, 255, 0) 100%),
+    linear-gradient(180deg, rgba(247, 252, 255, 0.96) 0%, rgba(240, 248, 255, 0.92) 100%);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.view {
+  display: none;
+}
+
+.view.active {
+  display: block;
+}
+
+.setup-form {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  grid-template-areas:
+    "guide guide"
+    "taxon output"
+    "taxon marker"
+    "ncbi exec"
+    "filters post"
+    "actions actions";
+}
+
+.card {
+  border: 1px solid #d9e9f7;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-strong) 100%);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.card h3 {
+  font-size: 15px;
+  line-height: 1.2;
+  color: #2e4f66;
+}
+
+.card-taxon {
+  grid-area: taxon;
+}
+
+.card-guide {
+  grid-area: guide;
+  border-color: #cde4f6;
+  background:
+    linear-gradient(180deg, #f7fcff 0%, #f0f8ff 100%);
+}
+
+.card-output {
+  grid-area: output;
+}
+
+.card-marker {
+  grid-area: marker;
+}
+
+.card-exec {
+  grid-area: exec;
+}
+
+.card-ncbi {
+  grid-area: ncbi;
+}
+
+.card-filters {
+  grid-area: filters;
+}
+
+.card-postprep {
+  grid-area: post;
+}
+
+.guide-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.guide-badge {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+  color: #fff;
+  background: linear-gradient(140deg, #35bbff 0%, #1594ef 100%);
+  box-shadow: 0 6px 14px rgba(28, 138, 218, 0.32);
+}
+
+.guide-copy {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.guide-arrow {
+  border: 1px dashed #b8daf5;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #3173a5;
+  background: #f3faff;
+}
+
+.flow-checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.flow-item {
+  border: 1px solid #d7e8f6;
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+  background: #fcfeff;
+  color: #597689;
+}
+
+.flow-item.pending::before {
+  content: "• ";
+  color: #97afc1;
+}
+
+.flow-item.done {
+  border-color: #abdaf7;
+  background: #e9f6ff;
+  color: #266f9f;
+}
+
+.flow-item.done::before {
+  content: "✓ ";
+  color: #0f97e9;
+  font-weight: 700;
+}
+
+.flow-item.neutral {
+  border-style: dashed;
+  color: #7c93a4;
+  background: #f9fcff;
+}
+
+.flow-item.neutral::before {
+  content: "○ ";
+  color: #9bb0c0;
+}
+
+.post-guide {
+  border-top: 1px solid #dbeaf6;
+  margin-top: 2px;
+  padding-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.post-guide-title {
+  font-size: 12px;
+  color: #5d84a1;
+}
+
+.post-flow-checklist {
+  grid-template-columns: 1fr;
+}
+
+label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #d2e5f5;
+  border-radius: 11px;
+  background: #fcfeff;
+  color: var(--ink);
+  padding: 10px 11px;
+}
+
+.hidden-taxids {
+  display: none;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 210px;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #8bc9ff;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(139, 201, 255, 0.28);
+}
+
+.inline {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr auto;
+}
+
+.taxid-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.taxid-entry button {
+  width: 84px;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+.taxid-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.taxid-toolbar span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.taxid-toolbar button {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #f7fbff;
+}
+
+.taxid-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 112px;
+  max-height: 210px;
+  overflow: auto;
+  border: 1px solid #d2e5f5;
+  border-radius: 11px;
+  background: #fcfeff;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-content: flex-start;
+  padding: 8px;
+}
+
+.taxid-list.empty::before {
+  content: "No taxid added";
+  color: #8ea4b6;
+  font-size: 12px;
+}
+
+.marker-list.empty::before {
+  content: "No marker added";
+}
+
+.taxid-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px 5px 9px;
+  border: 1px solid #bfddf4;
+  border-radius: 999px;
+  background: #eaf6ff;
+  color: #24506d;
+  font-size: 12px;
+}
+
+.marker-pill {
+  background: #e5f4ff;
+  border-color: #b7dbf7;
+}
+
+.card-marker .taxid-list {
+  min-height: 72px;
+  max-height: 110px;
+}
+
+.card-marker .taxid-pill {
+  font-size: 11px;
+}
+
+.card-marker .taxid-entry button {
+  width: 72px;
+}
+
+.card-taxon {
+  align-content: start;
+}
+
+.card-taxon .taxid-entry {
+  grid-template-columns: minmax(0, 1fr) 84px;
+}
+
+.card-taxon .taxid-list {
+  min-height: 188px;
+  max-height: 290px;
+}
+
+.card-taxon .taxid-pill {
+  font-size: 13px;
+}
+
+.taxid-remove {
+  border: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  padding: 0;
+  line-height: 1;
+  background: #d2ecff;
+  color: #2b6288;
+  cursor: pointer;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.check input {
+  width: auto;
+  margin: 0;
+  accent-color: #2caeff;
+}
+
+.step-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.actions {
+  grid-area: actions;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 2px 4px;
+}
+
+button {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #f2f8ff;
+  color: var(--ink);
+  padding: 9px 16px;
+  cursor: pointer;
+}
+
+button.primary {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(130deg, #39bcff 0%, #1798ef 100%);
+}
+
+button.primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.danger {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(130deg, #d63f47 0%, #aa1f2f 100%);
+}
+
+.monitor-header {
+  margin-bottom: 12px;
+}
+
+progress {
+  width: 100%;
+  height: 14px;
+}
+
+.metrics,
+.logs {
+  margin-bottom: 12px;
+}
+
+#metrics-list,
+#result-files {
+  margin: 0;
+  padding-left: 18px;
+}
+
+#log-view {
+  min-height: 260px;
+  max-height: 460px;
+  overflow: auto;
+  margin: 0;
+  padding: 11px;
+  border: 1px solid #18344a;
+  border-radius: 10px;
+  background: #0f1c2a;
+  color: #d6f7e4;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+@media (max-width: 1080px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .side-pane {
+    gap: 12px;
+  }
+
+  .tabs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .setup-form {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "guide"
+      "taxon"
+      "output"
+      "marker"
+      "exec"
+      "ncbi"
+      "filters"
+      "post"
+      "actions";
+  }
+
+  .step-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-checklist {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .inline {
+    grid-template-columns: 1fr;
+  }
+
+  .taxid-entry {
+    grid-template-columns: 1fr;
+  }
+
+  .actions {
+    justify-content: stretch;
+  }
+
+  .actions button {
+    flex: 1;
+  }
+}
