@@ -5,14 +5,19 @@ import re
 import time
 import csv
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
 from string import Formatter
 from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import typer
 from Bio.Data.IUPACData import ambiguous_dna_values
@@ -81,6 +86,7 @@ def render_run_table(
     filters_cfg: Dict,
     dump_gb: Optional[Path] = None,
     from_gb: Optional[Path] = None,
+    remote_entrez_api: Optional[str] = None,
     resume: bool = False,
 ) -> None:
     table = Table(title="Run Summary", show_header=True, header_style="bold")
@@ -98,6 +104,8 @@ def render_run_table(
         table.add_row("From GB", str(from_gb))
     if dump_gb:
         table.add_row("Dump GB", str(dump_gb))
+    if remote_entrez_api:
+        table.add_row("Remote Entrez API", str(remote_entrez_api))
     if resume:
         table.add_row("Resume", "true")
     console.print(table)
@@ -1135,6 +1143,47 @@ def resolve_taxid(taxon: str) -> Tuple[str, Optional[str]]:
     return ids[0], None
 
 
+def _http_post_json(base_url: str, endpoint: str, payload: Dict, timeout_sec: int = 120) -> Dict:
+    url = base_url.rstrip("/") + endpoint
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=timeout_sec) as resp:
+            raw = resp.read().decode("utf-8")
+            parsed = json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        raise typer.BadParameter(f"remote Entrez API {endpoint} failed: HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        raise typer.BadParameter(f"remote Entrez API {endpoint} failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"remote Entrez API {endpoint} returned invalid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter(f"remote Entrez API {endpoint} returned invalid response shape.")
+    if parsed.get("ok") is False:
+        message = str(parsed.get("error") or "unknown error")
+        raise typer.BadParameter(f"remote Entrez API {endpoint} failed: {message}")
+    return parsed
+
+
+def resolve_taxid_remote(taxon: str, remote_entrez_api: str) -> Tuple[str, Optional[str]]:
+    if re.fullmatch(r"\d+", taxon):
+        return taxon, None
+    payload = {"taxon": taxon}
+    data = _http_post_json(remote_entrez_api, "/v1/taxonomy/resolve", payload)
+    taxid = str(data.get("taxid") or "").strip()
+    if not taxid:
+        raise typer.BadParameter(f"Taxon not found in NCBI Taxonomy: {taxon}")
+    warning = data.get("warning")
+    if warning is not None:
+        warning = str(warning)
+    return taxid, warning
+
+
 def default_delay(ncbi_cfg: Dict) -> float:
     delay = ncbi_cfg.get("delay_sec")
     if delay is not None:
@@ -1142,6 +1191,117 @@ def default_delay(ncbi_cfg: Dict) -> float:
     if getattr(Entrez, "api_key", None):
         return 0.11
     return 0.34
+
+
+def fetch_genbank_remote(
+    query: str,
+    ncbi_cfg: Dict,
+    delay_sec: float,
+    remote_entrez_api: str,
+    start_at: int = 0,
+    dump_dir: Optional[Path] = None,
+    resume: bool = False,
+    taxid: Optional[str] = None,
+) -> Tuple[int, Iterable[Tuple[int, str]]]:
+    db = ncbi_cfg.get("db", "nucleotide")
+    rettype = ncbi_cfg.get("rettype", "fasta")
+    retmode = ncbi_cfg.get("retmode", "text")
+    per_query = int(ncbi_cfg.get("per_query", 100))
+    use_history = bool(ncbi_cfg.get("use_history", True))
+
+    if rettype not in {"gb", "gbwithparts"}:
+        raise typer.BadParameter("ncbi.rettype must be 'gb' or 'gbwithparts' for region extraction.")
+
+    search_payload = {
+        "db": db,
+        "term": query,
+        "retmax": 0,
+        "retstart": 0,
+        "usehistory": bool(use_history),
+    }
+    search_result = _http_post_json(remote_entrez_api, "/v1/genbank/esearch", search_payload)
+    count = int(search_result.get("count", 0))
+    webenv = search_result.get("webenv")
+    query_key = search_result.get("query_key")
+
+    if count == 0:
+        return 0, []
+
+    cache_root = None
+    if dump_dir:
+        cache_root = dump_dir / ".cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+
+    def dump_path_for(start: int) -> Optional[Path]:
+        if not cache_root:
+            return None
+        return cache_root / f"start{start:09d}_count{per_query:04d}.cache"
+
+    def load_cached(start: int) -> Optional[str]:
+        path = dump_path_for(start)
+        if path and path.exists():
+            return path.read_text(encoding="utf-8", errors="ignore")
+        return None
+
+    def save_cached(start: int, data: str) -> None:
+        path = dump_path_for(start)
+        if path:
+            path.write_text(data, encoding="utf-8")
+
+    def gen() -> Iterable[Tuple[int, str]]:
+        if use_history and webenv and query_key:
+            for start in range(start_at, count, per_query):
+                cached = load_cached(start) if resume else None
+                if cached is not None:
+                    yield start, cached
+                    continue
+                fetch_payload = {
+                    "db": db,
+                    "rettype": rettype,
+                    "retmode": retmode,
+                    "retstart": start,
+                    "retmax": per_query,
+                    "webenv": webenv,
+                    "query_key": query_key,
+                }
+                fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
+                data = str(fetch_result.get("data") or "")
+                if cache_root:
+                    save_cached(start, data)
+                yield start, data
+                time.sleep(delay_sec)
+            return
+
+        for start in range(start_at, count, per_query):
+            cached = load_cached(start) if resume else None
+            if cached is not None:
+                yield start, cached
+                continue
+            search_payload = {
+                "db": db,
+                "term": query,
+                "retstart": start,
+                "retmax": per_query,
+                "usehistory": False,
+            }
+            search_result = _http_post_json(remote_entrez_api, "/v1/genbank/esearch", search_payload)
+            ids = search_result.get("id_list") or []
+            if not ids:
+                continue
+            fetch_payload = {
+                "db": db,
+                "rettype": rettype,
+                "retmode": retmode,
+                "id": ",".join([str(x) for x in ids]),
+            }
+            fetch_result = _http_post_json(remote_entrez_api, "/v1/genbank/efetch", fetch_payload)
+            data = str(fetch_result.get("data") or "")
+            if cache_root:
+                save_cached(start, data)
+            yield start, data
+            time.sleep(delay_sec)
+
+    return count, gen()
 
 
 def fetch_genbank(
@@ -1431,6 +1591,171 @@ def list_primer_sets(
     console.print(table)
 
 
+def _bridge_write_json(handler: BaseHTTPRequestHandler, status: int, payload: Dict) -> None:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _bridge_read_json(handler: BaseHTTPRequestHandler) -> Dict:
+    length_raw = handler.headers.get("Content-Length") or "0"
+    try:
+        length = int(length_raw)
+    except ValueError:
+        length = 0
+    raw = handler.rfile.read(max(0, length)).decode("utf-8", errors="ignore")
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON body must be an object.")
+    return parsed
+
+
+def make_entrez_bridge_handler(log_requests: bool = False):
+    class EntrezBridgeHandler(BaseHTTPRequestHandler):
+        def _ok(self, payload: Dict, status: int = HTTPStatus.OK) -> None:
+            payload = dict(payload)
+            payload["ok"] = True
+            _bridge_write_json(self, int(status), payload)
+
+        def _error(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+            _bridge_write_json(
+                self,
+                int(status),
+                {
+                    "ok": False,
+                    "error": str(message),
+                },
+            )
+
+        def do_OPTIONS(self) -> None:
+            _bridge_write_json(self, int(HTTPStatus.OK), {"ok": True})
+
+        def do_POST(self) -> None:
+            try:
+                payload = _bridge_read_json(self)
+            except Exception as exc:
+                self._error(f"Invalid JSON request: {exc}", HTTPStatus.BAD_REQUEST)
+                return
+
+            try:
+                if self.path == "/v1/taxonomy/resolve":
+                    taxon = str(payload.get("taxon") or "").strip()
+                    if not taxon:
+                        self._error("'taxon' is required.", HTTPStatus.BAD_REQUEST)
+                        return
+                    taxid, warning = resolve_taxid(taxon)
+                    self._ok({"taxid": taxid, "warning": warning})
+                    return
+
+                if self.path == "/v1/genbank/esearch":
+                    db = str(payload.get("db") or "nucleotide")
+                    term = str(payload.get("term") or "").strip()
+                    retstart = int(payload.get("retstart") or 0)
+                    retmax = int(payload.get("retmax") or 0)
+                    usehistory = "y" if bool(payload.get("usehistory", True)) else "n"
+                    if not term:
+                        self._error("'term' is required.", HTTPStatus.BAD_REQUEST)
+                        return
+                    handle = Entrez.esearch(
+                        db=db,
+                        term=term,
+                        retstart=retstart,
+                        retmax=retmax,
+                        usehistory=usehistory,
+                    )
+                    record = Entrez.read(handle)
+                    self._ok(
+                        {
+                            "count": int(record.get("Count", 0)),
+                            "webenv": record.get("WebEnv"),
+                            "query_key": record.get("QueryKey"),
+                            "id_list": record.get("IdList", []),
+                        }
+                    )
+                    return
+
+                if self.path == "/v1/genbank/efetch":
+                    db = str(payload.get("db") or "nucleotide")
+                    rettype = str(payload.get("rettype") or "gb")
+                    retmode = str(payload.get("retmode") or "text")
+                    request_kwargs: Dict[str, object] = {
+                        "db": db,
+                        "rettype": rettype,
+                        "retmode": retmode,
+                    }
+                    ids = payload.get("id")
+                    if ids:
+                        request_kwargs["id"] = str(ids)
+                    else:
+                        webenv = payload.get("webenv")
+                        query_key = payload.get("query_key")
+                        retstart = int(payload.get("retstart") or 0)
+                        retmax = int(payload.get("retmax") or 0)
+                        if not webenv or query_key is None:
+                            self._error(
+                                "Either 'id' or both 'webenv' and 'query_key' are required.",
+                                HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+                        request_kwargs["webenv"] = str(webenv)
+                        request_kwargs["query_key"] = str(query_key)
+                        request_kwargs["retstart"] = retstart
+                        request_kwargs["retmax"] = retmax
+                    fetch_handle = Entrez.efetch(**request_kwargs)
+                    data = fetch_handle.read()
+                    self._ok({"data": data})
+                    return
+
+                self._error(f"Unknown endpoint: {self.path}", HTTPStatus.NOT_FOUND)
+            except Exception as exc:
+                self._error(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        def log_message(self, fmt: str, *args) -> None:  # type: ignore[override]
+            if log_requests:
+                super().log_message(fmt, *args)
+
+    return EntrezBridgeHandler
+
+
+@app.command("serve-entrez-bridge")
+def serve_entrez_bridge(
+    host: str = typer.Option("127.0.0.1", "--host", help="Host for bridge server."),
+    port: int = typer.Option(8765, "--port", help="Port for bridge server."),
+    email: Optional[str] = typer.Option(None, "--email", help="NCBI email override."),
+    api_key: Optional[str] = typer.Option(None, "--api-key", help="NCBI API key override."),
+    log_requests: bool = typer.Option(False, "--log-requests", help="Enable HTTP request logs."),
+) -> None:
+    """
+    Start an HTTP bridge for Entrez (hybrid mode for browser/Pyodide clients).
+    """
+    ncbi_cfg: Dict[str, str] = {}
+    if email:
+        ncbi_cfg["email"] = email
+    if api_key:
+        ncbi_cfg["api_key"] = api_key
+    setup_entrez(ncbi_cfg)
+
+    handler_cls = make_entrez_bridge_handler(log_requests=log_requests)
+    server = ThreadingHTTPServer((host, port), handler_cls)
+    server.daemon_threads = True
+    console.print(f"Entrez bridge listening on http://{host}:{port}")
+    console.print("POST /v1/taxonomy/resolve, /v1/genbank/esearch, /v1/genbank/efetch")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("Stopping bridge server...")
+    finally:
+        server.server_close()
+
+
 @app.command()
 def build(
     config: Path = typer.Option(..., "--config", "-c", help="Path to TOML config file."),
@@ -1446,6 +1771,11 @@ def build(
         None,
         "--from-gb",
         help="Directory of GenBank chunks to extract without downloading.",
+    ),
+    remote_entrez_api: Optional[str] = typer.Option(
+        None,
+        "--remote-entrez-api",
+        help="Base URL of Entrez bridge API for hybrid/browser execution.",
     ),
     resume: bool = typer.Option(False, "--resume", help="Resume using cached GenBank chunks."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print query and exit."),
@@ -1484,6 +1814,7 @@ def build(
       taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --output-prefix "mifish"
       taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
       taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Results/gb
+      taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --remote-entrez-api http://127.0.0.1:8765
     """
     cfg = load_config(config)
     ncbi_cfg = cfg.get("ncbi", {})
@@ -1492,7 +1823,9 @@ def build(
     post_prep_cfg = cfg.get("post_prep") or {}
     taxon_noexp = bool(cfg.get("taxon", {}).get("noexp", False))
 
-    setup_entrez(ncbi_cfg)
+    remote_entrez_api = remote_entrez_api.strip() if remote_entrez_api else None
+    if not remote_entrez_api:
+        setup_entrez(ncbi_cfg)
     marker_map = normalize_marker_map(cfg.get("markers", {}))
 
     marker_keys = [resolve_marker_key(m, marker_map) for m in marker]
@@ -1610,7 +1943,10 @@ def build(
     taxids: List[str] = []
     warnings: List[str] = []
     for t in taxon:
-        taxid, warn = resolve_taxid(t)
+        if remote_entrez_api:
+            taxid, warn = resolve_taxid_remote(t, remote_entrez_api)
+        else:
+            taxid, warn = resolve_taxid(t)
         taxids.append(taxid)
         if warn:
             warnings.append(warn)
@@ -1625,7 +1961,17 @@ def build(
         dump_gb.mkdir(parents=True, exist_ok=True)
 
     print_header()
-    render_run_table(config, taxids, marker_keys, out_path, filters_cfg, dump_gb, from_gb, resume)
+    render_run_table(
+        config,
+        taxids,
+        marker_keys,
+        out_path,
+        filters_cfg,
+        dump_gb=dump_gb,
+        from_gb=from_gb,
+        remote_entrez_api=remote_entrez_api,
+        resume=resume,
+    )
     for w in warnings:
         console.print(f"[yellow]WARNING:[/yellow] {w}")
 
@@ -1667,6 +2013,9 @@ def build(
         run_logger.info(f"# output_prefix: {output_prefix}")
         run_logger.info(f"# dump_gb: {dump_gb}" if dump_gb else "# dump_gb: none")
         run_logger.info(f"# from_gb: {from_gb}" if from_gb else "# from_gb: none")
+        run_logger.info(
+            f"# remote_entrez_api: {remote_entrez_api}" if remote_entrez_api else "# remote_entrez_api: none"
+        )
         run_logger.info(f"# resume: {resume}")
         run_logger.info(f"# post_prep: {post_prep}")
         if post_prep:
@@ -1700,14 +2049,25 @@ def build(
                     count = None
                     run_logger.info(f"# query count taxid={taxid}: from-gb")
                 else:
-                    count, data_iter = fetch_genbank(
-                        query,
-                        ncbi_cfg,
-                        delay_sec,
-                        dump_dir=dump_gb,
-                        resume=resume,
-                        taxid=taxid,
-                    )
+                    if remote_entrez_api:
+                        count, data_iter = fetch_genbank_remote(
+                            query,
+                            ncbi_cfg,
+                            delay_sec,
+                            remote_entrez_api=remote_entrez_api,
+                            dump_dir=dump_gb,
+                            resume=resume,
+                            taxid=taxid,
+                        )
+                    else:
+                        count, data_iter = fetch_genbank(
+                            query,
+                            ncbi_cfg,
+                            delay_sec,
+                            dump_dir=dump_gb,
+                            resume=resume,
+                            taxid=taxid,
+                        )
                     run_logger.info(f"# query count taxid={taxid}: {count}")
                     if count == 0:
                         console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")

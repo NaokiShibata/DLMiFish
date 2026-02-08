@@ -275,6 +275,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--output-prefix` | なし | 出力FASTAファイル名のプレフィックス (default: `taxondbbuilder_`) |
 | `--dump-gb` | なし | GenBankチャンクを保存 (キャッシュ) |
 | `--from-gb` | なし | 保存済みGenBankチャンクから抽出 |
+| `--remote-entrez-api` | なし | EntrezブリッジAPI経由で取得 (ハイブリッド実行) |
 | `--resume` | なし | キャッシュを優先して利用 |
 | `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理を有効化 |
 | `--post-prep-step` | `db.toml` の `[post_prep]` | 実行する後処理カテゴリを選択 (`primer_trim` / `length_filter` / `duplicate_report`) |
@@ -317,6 +318,21 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Re
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
 ```
+
+ハイブリッド実行 (Entrez をHTTPブリッジ経由で利用):
+```bash
+# 1) サーバー側でEntrezブリッジを起動
+python3 taxondbbuilder.py serve-entrez-bridge --host 127.0.0.1 --port 8765
+
+# 2) クライアント側(build)はブリッジURLを指定
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s \
+  --remote-entrez-api http://127.0.0.1:8765
+```
+
+EntrezブリッジAPI (`serve-entrez-bridge`) の主なエンドポイント:
+- `POST /v1/taxonomy/resolve` (`{"taxon":"Salmo salar"}` → `taxid`)
+- `POST /v1/genbank/esearch` (`db/term/retstart/retmax/usehistory` を指定)
+- `POST /v1/genbank/efetch` (`id` または `webenv/query_key + retstart/retmax` を指定)
 
 post-prep を有効化 (primer trim + 長さフィルタ + 重複ACCレポート):
 ```bash
@@ -372,6 +388,7 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 
 ## 抽出ロジック
 - NCBIから**GenBank形式**で取得し、feature注釈から目的領域を抽出します。
+- `--remote-entrez-api` 指定時は、ローカルEntrezではなく Entrez ブリッジ (`/v1/...`) 経由で取得します。
 - `region_patterns` が `gene/product/note/standard_name` などの注釈に一致したfeatureのみFASTAへ出力します。
 - `feature_types` を指定すると対象feature型を限定できます (例: rRNA, gene, CDS)。
 
