@@ -27,3 +27,8 @@ Results/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Tauri GUI
+tauri-gui/node_modules/
+tauri-gui/dist/
+tauri-gui/src-tauri/target/
