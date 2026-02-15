@@ -145,6 +145,11 @@ file = "configs/markers_mitogenome.toml"
   4) `taxondbbuilder.py` のある場所からの相対
 - `db.toml` 側に書いた `[markers.<id>]` は外部ファイル定義を**上書き**します。
 
+### taxon.noexp について
+- `[taxon].noexp = false` (デフォルト): `txid{taxid}[Organism]` を使って検索します。
+- `[taxon].noexp = true`: `txid{taxid}[Organism:noexp]` を使い、taxid 展開なしで検索します。
+- まずは `false` のまま使い、検索対象を taxid 直下に絞りたい場合に `true` を検討してください。
+
 ## 設定ガイド
 このツールの設定は「検索 (NCBIクエリ)」と「抽出 (GenBank feature注釈)」を分けて考えると整理しやすいです。
 
@@ -275,8 +280,8 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--output-prefix` | なし | 出力FASTAファイル名のプレフィックス (default: `taxondbbuilder_`) |
 | `--dump-gb` | なし | GenBankチャンクを保存 (キャッシュ) |
 | `--from-gb` | なし | 保存済みGenBankチャンクから抽出 |
-| `--remote-entrez-api` | なし | EntrezブリッジAPI経由で取得 (ハイブリッド実行) |
 | `--resume` | なし | キャッシュを優先して利用 |
+| `--dry-run` | なし | 実際の取得・抽出を行わず、生成されるNCBIクエリのみ表示 |
 | `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理を有効化 |
 | `--post-prep-step` | `db.toml` の `[post_prep]` | 実行する後処理カテゴリを選択 (`primer_trim` / `length_filter` / `duplicate_report`) |
 | `--post-prep-primer-set` | `[post_prep].primer_file` | primer_trim で使う primer_set をCLIから指定 (複数可・config上書き) |
@@ -319,35 +324,10 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Re
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
 ```
 
-ハイブリッド実行 (Entrez をHTTPブリッジ経由で利用):
+生成されるNCBIクエリだけを確認 (`--dry-run`):
 ```bash
-# 1) サーバー側でEntrezブリッジを起動
-python3 taxondbbuilder.py serve-entrez-bridge --host 127.0.0.1 --port 8765
-
-# 2) クライアント側(build)はブリッジURLを指定
-python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s \
-  --remote-entrez-api http://127.0.0.1:8765
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dry-run
 ```
-
-EntrezブリッジAPI (`serve-entrez-bridge`) の主なエンドポイント:
-- `POST /v1/taxonomy/resolve` (`{"taxon":"Salmo salar"}` → `taxid`)
-- `POST /v1/genbank/esearch` (`db/term/retstart/retmax/usehistory` を指定)
-- `POST /v1/genbank/efetch` (`id` または `webenv/query_key + retstart/retmax` を指定)
-
-ブラウザ実行プロトタイプ (`web/`):
-```bash
-# 1) Entrezブリッジを起動 (別ターミナル)
-python3 taxondbbuilder.py serve-entrez-bridge --host 127.0.0.1 --port 8765
-
-# 2) リポジトリルートを静的配信
-python3 -m http.server 8000
-
-# 3) ブラウザで開く
-# http://127.0.0.1:8000/web/
-```
-- ブラウザ側は `Pyodide + WebWorker` で実行されます。
-- UIでプロジェクトフォルダをアップロードし、`Config Path` と build オプションを指定して実行します。
-- 出力 (`.fasta`, `.log`, `.csv`) はダウンロードリンクとして表示されます。
 
 post-prep を有効化 (primer trim + 長さフィルタ + 重複ACCレポート):
 ```bash
@@ -403,7 +383,6 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 
 ## 抽出ロジック
 - NCBIから**GenBank形式**で取得し、feature注釈から目的領域を抽出します。
-- `--remote-entrez-api` 指定時は、ローカルEntrezではなく Entrez ブリッジ (`/v1/...`) 経由で取得します。
 - `region_patterns` が `gene/product/note/standard_name` などの注釈に一致したfeatureのみFASTAへ出力します。
 - `feature_types` を指定すると対象feature型を限定できます (例: rRNA, gene, CDS)。
 
@@ -494,3 +473,46 @@ reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
 
 ## Legacy
 旧パイプラインは削除済みです。現行方針では**DB用FASTA生成のみ**を対象とします。
+
+## 補助スクリプト (GUI向け)
+- `tauri-gui/scripts/build_sidecar.py`: Tauri GUI 用の sidecar バイナリを作成/配置するスクリプトです。
+- `--repo-root` でリポジトリルート、`--tauri-root` で `tauri-gui` の場所を指定できます。
+- `--stub` を付けると実バイナリの代わりに stub を作成し、オフラインの `cargo check` 用に利用できます。
+- 詳細手順は `tauri-gui/README.md` を参照してください。
+
+## tauri-gui の実行方法
+`tauri-gui` は GUI から `taxondbbuilder build` を実行するための Tauri アプリです。
+
+### 1. Python実行環境を作成 (uv)
+リポジトリルートで実行します。
+```bash
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install pyinstaller
+```
+`tauri-gui/` にいる状態で実行する場合は `uv pip install -r ../requirements.txt` を使ってください。
+
+### 2. セットアップ
+```bash
+cd tauri-gui
+npm install
+```
+
+### 3. sidecar バイナリを作成
+`tauri-gui/` から実行します。
+```bash
+python3 scripts/build_sidecar.py --repo-root .. --tauri-root .
+```
+
+### 4. 開発モードで起動
+```bash
+npm run tauri:dev
+```
+
+### 補足
+- sidecar は `src-tauri/bin/` に配置されます。
+- `scripts/build_sidecar.py` は `PyInstaller` が必要です（`.venv` を有効化して `uv pip install pyinstaller`）。
+- 開発時は `TAXONDBBUILDER_BIN` 環境変数で sidecar の絶対パスを直接指定することもできます（ディレクトリではなく実行ファイルを指定）。
+- Linux のビルド依存関係は `tauri-gui/README.md` の `Linux build dependencies` を参照してください。

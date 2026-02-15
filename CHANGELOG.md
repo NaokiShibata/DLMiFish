@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.0.0 (planned)
+
+### Scope
+- `main` (`2effd40`) から `feat/tauri-gui-v1` を Pull Request でマージする差分を対象。
+
+### Added
+- Tauri ベースのクロスプラットフォーム GUI を追加 (`tauri-gui/`)。
+- Sidecar 実行基盤 (Rust) を追加し、`taxondbbuilder` CLI のジョブ実行・進捗表示・ログ表示・結果表示を GUI から操作可能に。
+- `db.toml` 読み込み機能を追加し、GUI の入力パラメータへ反映可能に。
+- GitHub Actions に GUI ビルドワークフロー (`.github/workflows/tauri-build.yml`) を追加。
+
+### Changed
+- Entrez 取得処理で HTTP 400 発生時のフォールバックを追加し、履歴ベース取得失敗時の取得継続性を改善。
+- `.gitignore` を更新し、Tauri GUI のローカル生成物 (`node_modules`, `dist`, `target`, sidecar バイナリ, `__pycache__`) を除外。
+- `tauri-gui/.gitignore` を追加し、GUI 開発・ビルドで生成されるローカルファイルを `tauri-gui` 配下で管理可能に。
+- `tauri-gui/src-tauri/src/main.rs` の sidecar 解決処理を改善し、`TAXONDBBUILDER_BIN` がディレクトリを指す誤設定を明示エラー化。
+- `README.md` と `tauri-gui/README.md` を更新し、`uv` 前提の実行環境構築手順と GUI/CLI 利用フローを整理。
+
 ## 1.0.0 (2026-02-01)
 
 ### Changed

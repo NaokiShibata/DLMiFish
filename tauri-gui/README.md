@@ -1,22 +1,17 @@
 # TaxonDBBuilder GUI (Tauri)
 
-## Overview
-- No Python environment required (standalone sidecar binary required)
-- No server required (local execution only)
-- Configure taxid/marker/filters/post_prep in GUI and run `taxondbbuilder build`
+## 概要
+- GUIアプリをビルドして実行できます。
+- sidecarバイナリをコマンドラインで実行できます。
+- サーバーは不要です（ローカル実行のみ）。
 
-## Screens
-1. Run Setup
-2. Run Monitor
-3. Results
+## 1. GUIアプリとして使う（推奨）
+### 前提
+- Node.js / npm
+- Rust / cargo
+- Linux の場合は Tauri 依存ライブラリ
 
-## Setup
-```bash
-cd tauri-gui
-npm install
-```
-
-## Linux build dependencies (Ubuntu/Debian)
+Ubuntu/Debian:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
@@ -30,44 +25,49 @@ sudo apt-get install -y \
   patchelf
 ```
 
-## Run in dev mode
+### ビルド手順
+リポジトリルート (`TaxonDBBuilder/`) で:
 ```bash
-npm run tauri:dev
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install pyinstaller
 ```
 
-## Sidecar binaries
-Place sidecar binary under `src-tauri/bin/`.
+`tauri-gui/` で:
+```bash
+cd tauri-gui
+npm install
+python3 scripts/build_sidecar.py --repo-root .. --tauri-root .
+npm run tauri build
+```
 
-Tauri expects target-triple suffixed names for bundled sidecars:
-- Linux/macOS: `src-tauri/bin/taxondbbuilder-<target-triple>`
-- Windows: `src-tauri/bin/taxondbbuilder-<target-triple>.exe`
+### 実行
+生成物を起動します（例: Linux AppImage）。
+- `src-tauri/target/release/bundle/`
 
-For development, you can point directly to the sidecar via `TAXONDBBUILDER_BIN`.
+## 2. コマンドラインとして使う
+`tauri-gui/src-tauri/bin/` の sidecar を直接実行できます。
+
+```bash
+./src-tauri/bin/taxondbbuilder-<target-triple> --help
+./src-tauri/bin/taxondbbuilder-<target-triple> list-markers -c ../configs/db.toml
+./src-tauri/bin/taxondbbuilder-<target-triple> build -c ../configs/db.toml -t 117570 -m 12s --dry-run
+```
+
+注意:
+- sidecar はCLIです。単体でGUIは起動しません。
+
+## 補足（開発時のみ）
+- 開発起動: `npm run tauri:dev`
+- `TAXONDBBUILDER_BIN` を使う場合は、ディレクトリではなく実行ファイルの絶対パスを指定してください。
 
 ```bash
 export TAXONDBBUILDER_BIN=/abs/path/to/taxondbbuilder
 npm run tauri:dev
 ```
 
-## Build sidecar with PyInstaller
-From `tauri-gui/`:
-
-```bash
-python scripts/build_sidecar.py --repo-root .. --tauri-root .
-```
-
-This generates a standalone `taxondbbuilder` and places it under
-`src-tauri/bin/` with the expected target-triple suffix.
-
-Note: `cargo check` also validates `externalBin`, so run the sidecar build once
-before `cargo check` if the file does not exist yet.
-
-If you are offline and only need `cargo check`, create a stub sidecar:
-
-```bash
-python scripts/build_sidecar.py --repo-root .. --tauri-root . --stub
-```
-
-## Persistent config
+## 設定保存先
 - `~/.taxondb_gui/config.json`
-- If `save api_key` is off, API key is not persisted
+- `save api_key` をオフにすると API key は保存されません。
