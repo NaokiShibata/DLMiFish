@@ -13,6 +13,7 @@ from queue import Queue
 from string import Formatter
 from threading import Event, Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.error import HTTPError
 
 import typer
 from Bio.Data.IUPACData import ambiguous_dna_values
@@ -1192,6 +1193,26 @@ def fetch_genbank(
         if path:
             path.write_text(data, encoding="utf-8")
 
+    def fetch_chunk_by_ids(start: int) -> Optional[str]:
+        search_handle = Entrez.esearch(
+            db=db,
+            term=query,
+            retstart=start,
+            retmax=per_query,
+            usehistory="n",
+        )
+        search_record = Entrez.read(search_handle)
+        ids = search_record.get("IdList", [])
+        if not ids:
+            return None
+        fetch_handle = Entrez.efetch(
+            db=db,
+            rettype=rettype,
+            retmode=retmode,
+            id=",".join(ids),
+        )
+        return fetch_handle.read()
+
     def gen() -> Iterable[Tuple[int, str]]:
         if use_history and webenv and query_key:
             for start in range(start_at, count, per_query):
@@ -1199,16 +1220,24 @@ def fetch_genbank(
                 if cached is not None:
                     yield start, cached
                     continue
-                fetch_handle = Entrez.efetch(
-                    db=db,
-                    rettype=rettype,
-                    retmode=retmode,
-                    retstart=start,
-                    retmax=per_query,
-                    webenv=webenv,
-                    query_key=query_key,
-                )
-                data = fetch_handle.read()
+                try:
+                    fetch_handle = Entrez.efetch(
+                        db=db,
+                        rettype=rettype,
+                        retmode=retmode,
+                        retstart=start,
+                        retmax=per_query,
+                        webenv=webenv,
+                        query_key=query_key,
+                    )
+                    data = fetch_handle.read()
+                except HTTPError as exc:
+                    if exc.code != HTTPStatus.BAD_REQUEST:
+                        raise
+                    fallback = fetch_chunk_by_ids(start)
+                    if fallback is None:
+                        continue
+                    data = fallback
                 if cache_root:
                     save_cached(start, data)
                 yield start, data
@@ -1220,24 +1249,9 @@ def fetch_genbank(
             if cached is not None:
                 yield start, cached
                 continue
-            search_handle = Entrez.esearch(
-                db=db,
-                term=query,
-                retstart=start,
-                retmax=per_query,
-                usehistory="n",
-            )
-            search_record = Entrez.read(search_handle)
-            ids = search_record.get("IdList", [])
-            if not ids:
+            data = fetch_chunk_by_ids(start)
+            if data is None:
                 continue
-            fetch_handle = Entrez.efetch(
-                db=db,
-                rettype=rettype,
-                retmode=retmode,
-                id=",".join(ids),
-            )
-            data = fetch_handle.read()
             if cache_root:
                 save_cached(start, data)
             yield start, data
@@ -1625,7 +1639,16 @@ def build(
         dump_gb.mkdir(parents=True, exist_ok=True)
 
     print_header()
-    render_run_table(config, taxids, marker_keys, out_path, filters_cfg, dump_gb, from_gb, resume)
+    render_run_table(
+        config,
+        taxids,
+        marker_keys,
+        out_path,
+        filters_cfg,
+        dump_gb=dump_gb,
+        from_gb=from_gb,
+        resume=resume,
+    )
     for w in warnings:
         console.print(f"[yellow]WARNING:[/yellow] {w}")
 
@@ -1712,6 +1735,7 @@ def build(
                     if count == 0:
                         console.print(f"[yellow]taxid {taxid}: 0 records[/yellow]")
                         continue
+                    run_logger.info(f"# fetch progress taxid={taxid}: 0/{count}")
 
                 task_id = progress.add_task(f"taxid {taxid}", total=count)
                 if workers < 1:
@@ -1758,6 +1782,10 @@ def build(
                         break
                     if not chunk:
                         continue
+                    if count is not None and count > 0:
+                        per_query = int(ncbi_cfg.get("per_query", 100))
+                        fetched = min(start + per_query, count)
+                        run_logger.info(f"# fetch progress taxid={taxid}: {fetched}/{count}")
                     q.put((start, chunk))
 
                 for _ in threads:
