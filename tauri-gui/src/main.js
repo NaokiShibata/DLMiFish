@@ -16,6 +16,7 @@ const els = {
   status: document.querySelector("#status"),
   phase: document.querySelector("#phase"),
   progress: document.querySelector("#progress"),
+  progressDetail: document.querySelector("#progress-detail"),
   logs: document.querySelector("#log-view"),
   metricsList: document.querySelector("#metrics-list"),
   resultFiles: document.querySelector("#result-files"),
@@ -48,6 +49,14 @@ const els = {
   primerSetInput: document.querySelector("#primer-set"),
   postLengthMinInput: document.querySelector("#post-length-min"),
   postLengthMaxInput: document.querySelector("#post-length-max"),
+  ncbiDbInput: document.querySelector("#ncbi-db"),
+  ncbiRettypeInput: document.querySelector("#ncbi-rettype"),
+  ncbiRetmodeInput: document.querySelector("#ncbi-retmode"),
+  ncbiPerQueryInput: document.querySelector("#ncbi-per-query"),
+  ncbiUseHistoryInput: document.querySelector("#ncbi-use-history"),
+  ncbiDelaySecInput: document.querySelector("#ncbi-delay-sec"),
+  outputDefaultHeaderFormatInput: document.querySelector("#output-default-header-format"),
+  outputMifishHeaderFormatInput: document.querySelector("#output-mifish-header-format"),
   loadDbTomlBtn: document.querySelector("#load-db-toml"),
   loadedDbTomlPath: document.querySelector("#loaded-db-toml")
 };
@@ -86,6 +95,13 @@ function parseIntOrNull(value) {
   const v = `${value}`.trim();
   if (!v) return null;
   const parsed = Number.parseInt(v, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function parseFloatOrNull(value) {
+  const v = `${value}`.trim();
+  if (!v) return null;
+  const parsed = Number.parseFloat(v);
   return Number.isNaN(parsed) ? null : parsed;
 }
 
@@ -223,6 +239,19 @@ function applyImportedDbToml(imported) {
   document.querySelector("#post-length-min").value = postPrep.sequenceLengthMin ?? "";
   document.querySelector("#post-length-max").value = postPrep.sequenceLengthMax ?? "";
   setPostPrepStepSelection(postPrep.steps || []);
+
+  const ncbiOptions = imported.ncbiOptions || {};
+  els.ncbiDbInput.value = ncbiOptions.db || "nucleotide";
+  els.ncbiRettypeInput.value = ncbiOptions.rettype || "gb";
+  els.ncbiRetmodeInput.value = ncbiOptions.retmode || "text";
+  els.ncbiPerQueryInput.value = ncbiOptions.perQuery || 100;
+  els.ncbiUseHistoryInput.checked = ncbiOptions.useHistory !== false;
+  els.ncbiDelaySecInput.value = ncbiOptions.delaySec ?? "";
+
+  const outputOptions = imported.outputOptions || {};
+  els.outputDefaultHeaderFormatInput.value =
+    outputOptions.defaultHeaderFormat || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
+  els.outputMifishHeaderFormatInput.value = outputOptions.mifishHeaderFormat || "gb|{acc_id}|{organism}";
 }
 
 function isReadyToRun() {
@@ -306,6 +335,19 @@ function collectRequest() {
       sequenceLengthMin: parseIntOrNull(document.querySelector("#post-length-min").value),
       sequenceLengthMax: parseIntOrNull(document.querySelector("#post-length-max").value)
     },
+    ncbiOptions: {
+      db: els.ncbiDbInput.value.trim() || "nucleotide",
+      rettype: els.ncbiRettypeInput.value.trim() || "gb",
+      retmode: els.ncbiRetmodeInput.value.trim() || "text",
+      perQuery: Math.max(1, Number.parseInt(els.ncbiPerQueryInput.value, 10) || 100),
+      useHistory: els.ncbiUseHistoryInput.checked,
+      delaySec: parseFloatOrNull(els.ncbiDelaySecInput.value)
+    },
+    outputOptions: {
+      defaultHeaderFormat:
+        els.outputDefaultHeaderFormatInput.value.trim() || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}",
+      mifishHeaderFormat: els.outputMifishHeaderFormatInput.value.trim() || "gb|{acc_id}|{organism}"
+    },
     workers: Number.parseInt(document.querySelector("#speed").value, 10),
     resume: document.querySelector("#resume").checked
   };
@@ -315,6 +357,7 @@ function resetMonitor() {
   els.status.textContent = "Idle";
   els.phase.textContent = "-";
   els.progress.value = 0;
+  els.progressDetail.textContent = "0.0%";
   els.logs.textContent = "";
   els.metricsList.innerHTML = "";
 }
@@ -328,9 +371,22 @@ function appendLog(line) {
 
 function renderMetrics(metrics) {
   const items = [];
-  if (metrics?.queryCountByTaxid) {
-    for (const [taxid, count] of Object.entries(metrics.queryCountByTaxid)) {
+  const queryCountByTaxid = metrics?.queryCountByTaxid || {};
+  const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
+  const allTaxids = new Set([...Object.keys(queryCountByTaxid), ...Object.keys(fetchCountByTaxid)]);
+  for (const taxid of Array.from(allTaxids).sort()) {
+    if (queryCountByTaxid[taxid] != null) {
+      const count = queryCountByTaxid[taxid];
       items.push(`query count taxid=${taxid}: ${count}`);
+    }
+    if (fetchCountByTaxid[taxid] != null) {
+      const fetched = fetchCountByTaxid[taxid];
+      const total = queryCountByTaxid[taxid];
+      if (total != null) {
+        items.push(`fetch progress taxid=${taxid}: ${Math.min(fetched, total)}/${total}`);
+      } else {
+        items.push(`fetch progress taxid=${taxid}: ${fetched}`);
+      }
     }
   }
   if (metrics?.matchedRecords != null) items.push(`matched records: ${metrics.matchedRecords}`);
@@ -350,6 +406,29 @@ function renderMetrics(metrics) {
     li.textContent = text;
     els.metricsList.appendChild(li);
   }
+}
+
+function renderProgressDetail(phase, percent, metrics) {
+  const safePercent = typeof percent === "number" ? Math.max(0, Math.min(percent, 100)) : null;
+  let detail = safePercent != null ? `${safePercent.toFixed(1)}%` : "-";
+
+  const queryCountByTaxid = metrics?.queryCountByTaxid || {};
+  const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
+  const total = Object.values(queryCountByTaxid).reduce((acc, v) => acc + (Number(v) || 0), 0);
+  if (total > 0) {
+    const fetched = Object.entries(fetchCountByTaxid).reduce((acc, [taxid, raw]) => {
+      const done = Number(raw) || 0;
+      const max = Number(queryCountByTaxid[taxid]) || done;
+      return acc + Math.min(done, max);
+    }, 0);
+    const fetchRatio = (Math.min(fetched, total) / total) * 100;
+    detail = `fetch ${Math.min(fetched, total)}/${total} (${fetchRatio.toFixed(1)}%)`;
+    if (phase && phase !== "Fetch/Parse" && safePercent != null) {
+      detail = `${detail} | total ${safePercent.toFixed(1)}%`;
+    }
+  }
+
+  els.progressDetail.textContent = detail;
 }
 
 function renderResultFiles(files) {
@@ -390,6 +469,7 @@ async function setupEventListener() {
     if (payload.eventType === "progress") {
       if (payload.phase) els.phase.textContent = payload.phase;
       if (payload.percent != null) els.progress.value = payload.percent;
+      renderProgressDetail(payload.phase, payload.percent, payload.metrics);
       if (payload.metrics) renderMetrics(payload.metrics);
     }
     if (payload.eventType === "result") {
@@ -422,6 +502,18 @@ async function loadSavedConfig() {
       addMarkers(document.querySelector("#marker").value);
     }
     if (saved.workers) document.querySelector("#speed").value = `${saved.workers}`;
+    if (saved.ncbiDb) els.ncbiDbInput.value = saved.ncbiDb;
+    if (saved.ncbiRettype) els.ncbiRettypeInput.value = saved.ncbiRettype;
+    if (saved.ncbiRetmode) els.ncbiRetmodeInput.value = saved.ncbiRetmode;
+    if (saved.ncbiPerQuery) els.ncbiPerQueryInput.value = `${saved.ncbiPerQuery}`;
+    if (saved.ncbiUseHistory != null) els.ncbiUseHistoryInput.checked = Boolean(saved.ncbiUseHistory);
+    if (saved.ncbiDelaySec != null) els.ncbiDelaySecInput.value = `${saved.ncbiDelaySec}`;
+    if (saved.outputDefaultHeaderFormat) {
+      els.outputDefaultHeaderFormatInput.value = saved.outputDefaultHeaderFormat;
+    }
+    if (saved.outputMifishHeaderFormat) {
+      els.outputMifishHeaderFormatInput.value = saved.outputMifishHeaderFormat;
+    }
     updateGuidanceState();
   } catch (error) {
     appendLog(`[warn] load config failed: ${error}`);
