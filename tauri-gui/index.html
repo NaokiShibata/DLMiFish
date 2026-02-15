@@ -62,112 +62,148 @@
                 </ul>
               </div>
             </section>
+            <div class="setup-columns">
+              <div class="setup-col setup-col-left">
+                <section class="card card-taxon">
+                  <h3>Taxon Input</h3>
+                  <label for="taxid-input">taxid</label>
+                  <div class="taxid-entry">
+                    <input
+                      id="taxid-input"
+                      type="text"
+                      placeholder="32443 or 32443,7777 or multiline paste"
+                      autocomplete="off"
+                    />
+                    <button id="add-taxid" type="button">Add</button>
+                  </div>
+                  <div class="taxid-toolbar">
+                    <span id="taxid-count">0 taxids</span>
+                    <button id="clear-taxids" type="button">Clear all</button>
+                  </div>
+                  <ul id="taxid-list" class="taxid-list"></ul>
+                  <textarea id="taxids" class="hidden-taxids" aria-hidden="true"></textarea>
+                </section>
 
-            <section class="card card-taxon">
-              <h3>Taxon Input</h3>
-              <label for="taxid-input">taxid</label>
-              <div class="taxid-entry">
-                <input
-                  id="taxid-input"
-                  type="text"
-                  placeholder="32443 or 32443,7777 or multiline paste"
-                  autocomplete="off"
-                />
-                <button id="add-taxid" type="button">Add</button>
-              </div>
-              <div class="taxid-toolbar">
-                <span id="taxid-count">0 taxids</span>
-                <button id="clear-taxids" type="button">Clear all</button>
-              </div>
-              <ul id="taxid-list" class="taxid-list"></ul>
-              <textarea id="taxids" class="hidden-taxids" aria-hidden="true"></textarea>
-            </section>
+                <section class="card card-ncbi">
+                  <h3>NCBI</h3>
+                  <label for="email">email</label>
+                  <input id="email" type="email" placeholder="your.email@example.com" required />
+                  <label for="api-key">api_key</label>
+                  <input id="api-key" type="password" placeholder="optional" />
+                  <label class="check"><input id="save-api-key" type="checkbox" /> save api_key</label>
+                  <details class="advanced-block">
+                    <summary>Advanced NCBI options</summary>
+                    <label for="ncbi-db">db</label>
+                    <input id="ncbi-db" type="text" value="nucleotide" />
+                    <label for="ncbi-rettype">rettype</label>
+                    <select id="ncbi-rettype">
+                      <option value="gb" selected>gb</option>
+                      <option value="gbwithparts">gbwithparts</option>
+                    </select>
+                    <label for="ncbi-retmode">retmode</label>
+                    <select id="ncbi-retmode">
+                      <option value="text" selected>text</option>
+                      <option value="xml">xml</option>
+                    </select>
+                    <label for="ncbi-per-query">per_query</label>
+                    <input id="ncbi-per-query" type="number" min="1" step="1" value="100" />
+                    <label class="check"><input id="ncbi-use-history" type="checkbox" checked /> use_history</label>
+                    <label for="ncbi-delay-sec">delay_sec (optional)</label>
+                    <input id="ncbi-delay-sec" type="number" min="0" step="0.01" placeholder="auto" />
+                  </details>
+                </section>
 
-            <section class="card card-output">
-              <h3>Output Options</h3>
-              <label for="output-prefix">output_prefix</label>
-              <input id="output-prefix" type="text" value="MiFish" />
-              <label for="output-root">output directory</label>
-              <div class="inline">
-                <input id="output-root" type="text" placeholder="/home/user/MiFish_runs" required />
-                <button id="pick-output" type="button">Browse</button>
-              </div>
-            </section>
-
-            <section class="card card-marker">
-              <h3>Marker</h3>
-              <label for="marker">marker selector</label>
-              <div class="taxid-entry">
-                <select id="marker" required>
-                  <option value="12s">12s</option>
-                  <option value="16s">16s</option>
-                  <option value="coi">coi</option>
-                  <option value="cytb">cytb</option>
-                  <option value="mitogenome">mitogenome</option>
-                </select>
-                <button id="add-marker" type="button">Add</button>
-              </div>
-              <div class="taxid-toolbar">
-                <span id="marker-count">0 markers</span>
-                <button id="clear-markers" type="button">Clear all</button>
-              </div>
-              <ul id="marker-list" class="taxid-list marker-list"></ul>
-            </section>
-
-            <section class="card card-exec">
-              <h3>Execution</h3>
-              <label for="speed">speed</label>
-              <select id="speed">
-                <option value="4">low (4)</option>
-                <option value="8" selected>medium (8)</option>
-                <option value="16">high (16)</option>
-              </select>
-              <label class="check"><input id="resume" type="checkbox" checked /> resume</label>
-            </section>
-
-            <section class="card card-ncbi">
-              <h3>NCBI</h3>
-              <label for="email">email</label>
-              <input id="email" type="email" placeholder="your.email@example.com" required />
-              <label for="api-key">api_key</label>
-              <input id="api-key" type="password" placeholder="optional" />
-              <label class="check"><input id="save-api-key" type="checkbox" /> save api_key</label>
-            </section>
-
-            <section class="card card-filters">
-              <h3>Filters</h3>
-              <label class="check"><input id="f-mito" type="checkbox" checked /> mitochondrion</label>
-              <label class="check"><input id="f-ddbj" type="checkbox" checked /> ddbj_embl_genbank</label>
-              <label class="check"><input id="f-biomol" type="checkbox" checked /> biomol_genomic</label>
-              <label for="f-length-min">length_min</label>
-              <input id="f-length-min" type="number" min="0" placeholder="example: 120" />
-              <label for="f-length-max">length_max</label>
-              <input id="f-length-max" type="number" min="0" placeholder="example: 30000" />
-            </section>
-
-            <section class="card card-postprep">
-              <h3>Post Prep</h3>
-              <label class="check"><input id="post-enable" type="checkbox" /> enable</label>
-              <label for="primer-file">primer_file</label>
-              <div class="inline">
-                <input id="primer-file" type="text" placeholder="/path/to/primers.toml" />
-                <button id="pick-primer" type="button">Browse</button>
-              </div>
-              <label for="primer-set">primer_set (comma separated)</label>
-              <input id="primer-set" type="text" placeholder="mifish_u,mifish_ev2" />
-
-              <label>steps</label>
-              <div class="step-grid">
-                <label class="check"><input class="post-step" value="primer_trim" type="checkbox" /> primer_trim</label>
-                <label class="check"><input class="post-step" value="length_filter" type="checkbox" /> length_filter</label>
-                <label class="check"><input class="post-step" value="duplicate_report" type="checkbox" checked /> duplicate_report</label>
+                <section class="card card-filters">
+                  <h3>Filters</h3>
+                  <label class="check"><input id="f-mito" type="checkbox" checked /> mitochondrion</label>
+                  <label class="check"><input id="f-ddbj" type="checkbox" checked /> ddbj_embl_genbank</label>
+                  <label class="check"><input id="f-biomol" type="checkbox" checked /> biomol_genomic</label>
+                  <label for="f-length-min">length_min</label>
+                  <input id="f-length-min" type="number" min="0" placeholder="example: 120" />
+                  <label for="f-length-max">length_max</label>
+                  <input id="f-length-max" type="number" min="0" placeholder="example: 30000" />
+                </section>
               </div>
 
-              <label for="post-length-min">post sequence_length_min</label>
-              <input id="post-length-min" type="number" min="0" />
-              <label for="post-length-max">post sequence_length_max</label>
-              <input id="post-length-max" type="number" min="0" />
-            </section>
+              <div class="setup-col setup-col-right">
+                <section class="card card-output">
+                  <h3>Output Options</h3>
+                  <label for="output-prefix">output_prefix</label>
+                  <input id="output-prefix" type="text" value="MiFish" />
+                  <label for="output-root">output directory</label>
+                  <div class="inline">
+                    <input id="output-root" type="text" placeholder="/home/user/MiFish_runs" required />
+                    <button id="pick-output" type="button">Browse</button>
+                  </div>
+                  <details class="advanced-block">
+                    <summary>Advanced output format</summary>
+                    <label for="output-default-header-format">default_header_format</label>
+                    <input
+                      id="output-default-header-format"
+                      type="text"
+                      value="{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
+                    />
+                    <label for="output-mifish-header-format">output.header_formats.mifish_pipeline</label>
+                    <input id="output-mifish-header-format" type="text" value="gb|{acc_id}|{organism}" />
+                  </details>
+                </section>
+
+                <section class="card card-marker">
+                  <h3>Marker</h3>
+                  <label for="marker">marker selector</label>
+                  <div class="taxid-entry">
+                    <select id="marker" required>
+                      <option value="12s">12s</option>
+                      <option value="16s">16s</option>
+                      <option value="coi">coi</option>
+                      <option value="cytb">cytb</option>
+                      <option value="mitogenome">mitogenome</option>
+                    </select>
+                    <button id="add-marker" type="button">Add</button>
+                  </div>
+                  <div class="taxid-toolbar">
+                    <span id="marker-count">0 markers</span>
+                    <button id="clear-markers" type="button">Clear all</button>
+                  </div>
+                  <ul id="marker-list" class="taxid-list marker-list"></ul>
+                </section>
+
+                <section class="card card-exec">
+                  <h3>Execution</h3>
+                  <label for="speed">speed</label>
+                  <select id="speed">
+                    <option value="4">low (4)</option>
+                    <option value="8" selected>medium (8)</option>
+                    <option value="16">high (16)</option>
+                  </select>
+                  <label class="check"><input id="resume" type="checkbox" checked /> resume</label>
+                </section>
+
+                <section class="card card-postprep">
+                  <h3>Post Prep</h3>
+                  <label class="check"><input id="post-enable" type="checkbox" /> enable</label>
+                  <label for="primer-file">primer_file</label>
+                  <div class="inline">
+                    <input id="primer-file" type="text" placeholder="/path/to/primers.toml" />
+                    <button id="pick-primer" type="button">Browse</button>
+                  </div>
+                  <label for="primer-set">primer_set (comma separated)</label>
+                  <input id="primer-set" type="text" placeholder="mifish_u,mifish_ev2" />
+
+                  <label>steps</label>
+                  <div class="step-grid">
+                    <label class="check"><input class="post-step" value="primer_trim" type="checkbox" /> primer_trim</label>
+                    <label class="check"><input class="post-step" value="length_filter" type="checkbox" /> length_filter</label>
+                    <label class="check"><input class="post-step" value="duplicate_report" type="checkbox" checked /> duplicate_report</label>
+                  </div>
+
+                  <label for="post-length-min">post sequence_length_min</label>
+                  <input id="post-length-min" type="number" min="0" />
+                  <label for="post-length-max">post sequence_length_max</label>
+                  <input id="post-length-max" type="number" min="0" />
+                </section>
+              </div>
+            </div>
 
             <div class="actions">
               <button id="run" type="submit" class="primary">Run</button>
@@ -178,9 +214,14 @@
 
         <section id="view-monitor" class="view">
           <div class="card monitor-header">
-            <div><strong>Status:</strong> <span id="status">Idle</span></div>
-            <div><strong>Phase:</strong> <span id="phase">-</span></div>
-            <progress id="progress" max="100" value="0"></progress>
+            <div class="monitor-meta">
+              <div><strong>Status:</strong> <span id="status">Idle</span></div>
+              <div><strong>Phase:</strong> <span id="phase">-</span></div>
+            </div>
+            <div class="monitor-progress">
+              <progress id="progress" max="100" value="0"></progress>
+              <div id="progress-detail" class="progress-detail">0.0%</div>
+            </div>
           </div>
 
           <div class="card metrics">

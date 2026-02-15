@@ -157,16 +157,9 @@ select {
 }
 
 .setup-form {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-  grid-template-areas:
-    "guide guide"
-    "taxon output"
-    "taxon marker"
-    "ncbi exec"
-    "filters post"
-    "actions actions";
 }
 
 .card {
@@ -176,6 +169,7 @@ select {
   box-shadow: var(--shadow);
   padding: 14px;
   display: grid;
+  align-content: start;
   gap: 8px;
 }
 
@@ -185,39 +179,23 @@ select {
   color: #2e4f66;
 }
 
-.card-taxon {
-  grid-area: taxon;
-}
-
 .card-guide {
-  grid-area: guide;
   border-color: #cde4f6;
   background:
     linear-gradient(180deg, #f7fcff 0%, #f0f8ff 100%);
 }
 
-.card-output {
-  grid-area: output;
+.setup-columns {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: start;
 }
 
-.card-marker {
-  grid-area: marker;
-}
-
-.card-exec {
-  grid-area: exec;
-}
-
-.card-ncbi {
-  grid-area: ncbi;
-}
-
-.card-filters {
-  grid-area: filters;
-}
-
-.card-postprep {
-  grid-area: post;
+.setup-col {
+  display: grid;
+  gap: 14px;
+  align-content: start;
 }
 
 .guide-head {
@@ -315,6 +293,22 @@ select {
 
 .post-flow-checklist {
   grid-template-columns: 1fr;
+}
+
+.advanced-block {
+  border: 1px dashed #c9e1f4;
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 7px;
+  background: #f9fcff;
+}
+
+.advanced-block summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #2f6488;
+  font-weight: 600;
 }
 
 label {
@@ -493,7 +487,6 @@ select:focus {
 }
 
 .actions {
-  grid-area: actions;
   display: flex;
   justify-content: flex-end;
   gap: 10px;
@@ -530,9 +523,26 @@ button.danger {
   margin-bottom: 12px;
 }
 
+.monitor-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+
+.monitor-progress {
+  display: grid;
+  gap: 6px;
+}
+
 progress {
   width: 100%;
   height: 14px;
+}
+
+.progress-detail {
+  font-size: 12px;
+  color: #4b708c;
 }
 
 .metrics,
@@ -580,18 +590,8 @@ progress {
 }
 
 @media (max-width: 900px) {
-  .setup-form {
+  .setup-columns {
     grid-template-columns: 1fr;
-    grid-template-areas:
-      "guide"
-      "taxon"
-      "output"
-      "marker"
-      "exec"
-      "ncbi"
-      "filters"
-      "post"
-      "actions";
   }
 
   .step-grid {

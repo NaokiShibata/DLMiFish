@@ -19,12 +19,22 @@ use tauri::{AppHandle, Emitter, State};
 const RUN_EVENT: &str = "run-event";
 const CONFIG_DIR_NAME: &str = ".taxondb_gui";
 const CONFIG_FILE_NAME: &str = "config.json";
+const DEFAULT_NCBI_DB: &str = "nucleotide";
+const DEFAULT_NCBI_RETTYPE: &str = "gb";
+const DEFAULT_NCBI_RETMODE: &str = "text";
+const DEFAULT_NCBI_PER_QUERY: u32 = 100;
+const DEFAULT_OUTPUT_HEADER_FORMAT: &str = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
+const DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT: &str = "gb|{acc_id}|{organism}";
 
 static MARKERS_TEMPLATE: &str = include_str!("../../resources/templates/markers_mitogenome.toml");
 static PRIMERS_TEMPLATE: &str = include_str!("../../resources/templates/primers.toml");
 
 static RE_QUERY_COUNT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^# query count taxid=([^:]+):\s*(.+)$").expect("query count regex"));
+static RE_FETCH_PROGRESS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^# fetch progress taxid=([^:]+):\s*(\d+)\s*/\s*(\d+)$")
+        .expect("fetch progress regex")
+});
 static RE_TOTAL_RECORDS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^# total records:\s*(\d+)").expect("total records regex"));
 static RE_MATCHED_RECORDS: Lazy<Regex> =
@@ -39,8 +49,9 @@ static RE_DUP_GROUPS: Lazy<Regex> =
 static RE_DUP_CROSS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"cross_organism_groups=(\d+)").expect("cross organism groups regex"));
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 struct GuiConfig {
     email: String,
     api_key: String,
@@ -49,6 +60,36 @@ struct GuiConfig {
     output_prefix: String,
     marker: String,
     workers: u32,
+    ncbi_db: String,
+    ncbi_rettype: String,
+    ncbi_retmode: String,
+    ncbi_per_query: u32,
+    ncbi_use_history: bool,
+    ncbi_delay_sec: Option<f64>,
+    output_default_header_format: String,
+    output_mifish_header_format: String,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            email: String::new(),
+            api_key: String::new(),
+            save_api_key: false,
+            output_root: String::new(),
+            output_prefix: "MiFish".to_string(),
+            marker: "12s".to_string(),
+            workers: 8,
+            ncbi_db: DEFAULT_NCBI_DB.to_string(),
+            ncbi_rettype: DEFAULT_NCBI_RETTYPE.to_string(),
+            ncbi_retmode: DEFAULT_NCBI_RETMODE.to_string(),
+            ncbi_per_query: DEFAULT_NCBI_PER_QUERY,
+            ncbi_use_history: true,
+            ncbi_delay_sec: None,
+            output_default_header_format: DEFAULT_OUTPUT_HEADER_FORMAT.to_string(),
+            output_mifish_header_format: DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -74,6 +115,48 @@ struct PostPrepInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct NcbiOptionsInput {
+    db: String,
+    rettype: String,
+    retmode: String,
+    per_query: u32,
+    use_history: bool,
+    delay_sec: Option<f64>,
+}
+
+impl Default for NcbiOptionsInput {
+    fn default() -> Self {
+        Self {
+            db: DEFAULT_NCBI_DB.to_string(),
+            rettype: DEFAULT_NCBI_RETTYPE.to_string(),
+            retmode: DEFAULT_NCBI_RETMODE.to_string(),
+            per_query: DEFAULT_NCBI_PER_QUERY,
+            use_history: true,
+            delay_sec: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct OutputOptionsInput {
+    default_header_format: String,
+    mifish_header_format: String,
+}
+
+impl Default for OutputOptionsInput {
+    fn default() -> Self {
+        Self {
+            default_header_format: DEFAULT_OUTPUT_HEADER_FORMAT.to_string(),
+            mifish_header_format: DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunRequest {
     taxids: Vec<String>,
     markers: Vec<String>,
@@ -86,6 +169,10 @@ struct RunRequest {
     post_prep: PostPrepInput,
     workers: u32,
     resume: bool,
+    #[serde(default)]
+    ncbi_options: NcbiOptionsInput,
+    #[serde(default)]
+    output_options: OutputOptionsInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -94,6 +181,8 @@ struct ImportedDbTomlConfig {
     source_path: String,
     email: String,
     api_key: String,
+    ncbi_options: NcbiOptionsInput,
+    output_options: OutputOptionsInput,
     filters: FiltersInput,
     post_prep: PostPrepInput,
 }
@@ -113,6 +202,7 @@ struct StartRunResponse {
 #[serde(rename_all = "camelCase")]
 struct RunMetrics {
     query_count_by_taxid: BTreeMap<String, u64>,
+    fetch_count_by_taxid: BTreeMap<String, u64>,
     matched_records: Option<u64>,
     kept_records_before_post_prep: Option<u64>,
     primer_trim_removed: Option<u64>,
@@ -180,15 +270,39 @@ impl ProgressParser {
         if let Some(caps) = RE_QUERY_COUNT.captures(line) {
             let taxid = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
             let count_raw = caps.get(2).map(|m| m.as_str()).unwrap_or("").trim();
-            let count = count_raw.parse::<u64>().unwrap_or(0);
+            let count = count_raw.parse::<u64>().ok();
             if !taxid.is_empty() {
-                self.metrics
-                    .query_count_by_taxid
-                    .insert(taxid.to_string(), count);
+                if let Some(v) = count {
+                    self.metrics
+                        .query_count_by_taxid
+                        .insert(taxid.to_string(), v);
+                }
                 self.query_seen.insert(taxid.to_string());
                 self.phase = "Query count".to_string();
                 let total = self.taxid_total.max(1) as f64;
                 self.percent = ((self.query_seen.len() as f64 / total) * 10.0).clamp(0.0, 10.0);
+                changed = true;
+            }
+        }
+
+        if let Some(caps) = RE_FETCH_PROGRESS.captures(line) {
+            let taxid = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let fetched = caps
+                .get(2)
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            let total = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            if !taxid.is_empty() && total > 0 {
+                self.metrics
+                    .query_count_by_taxid
+                    .insert(taxid.to_string(), total);
+                self.metrics
+                    .fetch_count_by_taxid
+                    .insert(taxid.to_string(), fetched.min(total));
+                self.phase = "Fetch/Parse".to_string();
                 changed = true;
             }
         }
@@ -257,13 +371,35 @@ impl ProgressParser {
         }
 
         if changed {
+            if !self.metrics.fetch_count_by_taxid.is_empty() {
+                let mut taxid_progress_sum = 0.0;
+                for taxid in &self.query_seen {
+                    let Some(total) = self.metrics.query_count_by_taxid.get(taxid) else {
+                        continue;
+                    };
+                    if *total == 0 {
+                        taxid_progress_sum += 1.0;
+                        continue;
+                    }
+                    let done = *self.metrics.fetch_count_by_taxid.get(taxid).unwrap_or(&0);
+                    taxid_progress_sum += (done as f64 / *total as f64).clamp(0.0, 1.0);
+                }
+
+                if taxid_progress_sum > 0.0 {
+                    self.phase = "Fetch/Parse".to_string();
+                    let overall_ratio =
+                        (taxid_progress_sum / self.taxid_total.max(1) as f64).clamp(0.0, 1.0);
+                    self.percent = self
+                        .percent
+                        .max((10.0 + overall_ratio * 70.0).clamp(10.0, 80.0));
+                }
+            }
+
             if let (Some(total), Some(matched)) = (self.total_records, self.matched_records) {
                 if total > 0 {
                     self.phase = "Fetch/Parse".to_string();
                     let ratio = (matched as f64 / total as f64).clamp(0.0, 1.0);
-                    self.percent = (10.0 + ratio * 70.0)
-                        .clamp(10.0, 80.0)
-                        .max(self.percent.min(80.0));
+                    self.percent = self.percent.max((10.0 + ratio * 70.0).clamp(10.0, 80.0));
                 }
             }
 
@@ -412,10 +548,20 @@ fn prepare_job_dir(output_root: &Path) -> Result<(String, PathBuf), String> {
 
 fn resolve_sidecar_path() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("TAXONDBBUILDER_BIN") {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Ok(p);
+        let p = PathBuf::from(path.trim());
+        if !p.exists() {
+            return Err(format!(
+                "TAXONDBBUILDER_BIN is set but path does not exist: {}",
+                p.display()
+            ));
         }
+        if !p.is_file() {
+            return Err(format!(
+                "TAXONDBBUILDER_BIN must point to a file, got: {}",
+                p.display()
+            ));
+        }
+        return Ok(p);
     }
 
     let target_triple = option_env!("TAURI_ENV_TARGET_TRIPLE").unwrap_or("unknown-target");
@@ -544,22 +690,63 @@ fn write_job_config(req: &RunRequest, config_dir: &Path) -> Result<PathBuf, Stri
         req.post_prep.primer_file.trim().to_string()
     };
 
+    let ncbi_db = if req.ncbi_options.db.trim().is_empty() {
+        DEFAULT_NCBI_DB.to_string()
+    } else {
+        req.ncbi_options.db.trim().to_string()
+    };
+    let ncbi_rettype = if req.ncbi_options.rettype.trim().is_empty() {
+        DEFAULT_NCBI_RETTYPE.to_string()
+    } else {
+        req.ncbi_options.rettype.trim().to_string()
+    };
+    let ncbi_retmode = if req.ncbi_options.retmode.trim().is_empty() {
+        DEFAULT_NCBI_RETMODE.to_string()
+    } else {
+        req.ncbi_options.retmode.trim().to_string()
+    };
+    let ncbi_per_query = req.ncbi_options.per_query.max(1);
+
+    let output_default_header_format = if req.output_options.default_header_format.trim().is_empty()
+    {
+        DEFAULT_OUTPUT_HEADER_FORMAT.to_string()
+    } else {
+        req.output_options.default_header_format.trim().to_string()
+    };
+    let output_mifish_header_format = if req.output_options.mifish_header_format.trim().is_empty() {
+        DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT.to_string()
+    } else {
+        req.output_options.mifish_header_format.trim().to_string()
+    };
+
     let mut toml = String::new();
     toml.push_str("[ncbi]\n");
     toml.push_str(&format!("email = {}\n", toml_quote(req.email.trim())));
     if !req.api_key.trim().is_empty() {
         toml.push_str(&format!("api_key = {}\n", toml_quote(req.api_key.trim())));
     }
-    toml.push_str("db = \"nucleotide\"\n");
-    toml.push_str("rettype = \"gb\"\n");
-    toml.push_str("retmode = \"text\"\n");
-    toml.push_str("per_query = 100\n");
-    toml.push_str("use_history = true\n\n");
+    toml.push_str(&format!("db = {}\n", toml_quote(&ncbi_db)));
+    toml.push_str(&format!("rettype = {}\n", toml_quote(&ncbi_rettype)));
+    toml.push_str(&format!("retmode = {}\n", toml_quote(&ncbi_retmode)));
+    toml.push_str(&format!("per_query = {}\n", ncbi_per_query));
+    toml.push_str(&format!("use_history = {}\n", req.ncbi_options.use_history));
+    if let Some(delay_sec) = req.ncbi_options.delay_sec {
+        if delay_sec > 0.0 {
+            toml.push_str(&format!("delay_sec = {}\n", delay_sec));
+        }
+    }
+    toml.push('\n');
 
     toml.push_str("[output]\n");
-    toml.push_str("default_header_format = \"{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}\"\n\n");
+    toml.push_str(&format!(
+        "default_header_format = {}\n\n",
+        toml_quote(&output_default_header_format)
+    ));
     toml.push_str("[output.header_formats]\n");
-    toml.push_str("mifish_pipeline = \"gb|{acc_id}|{organism}\"\n\n");
+    toml.push_str(&format!(
+        "mifish_pipeline = {}\n\n",
+        toml_quote(&output_mifish_header_format)
+    ));
 
     toml.push_str("[taxon]\n");
     toml.push_str("noexp = false\n\n");
@@ -726,6 +913,15 @@ fn toml_u32(value: Option<&toml::Value>) -> Option<u32> {
         .and_then(|v| u32::try_from(v).ok())
 }
 
+fn toml_f64(value: Option<&toml::Value>) -> Option<f64> {
+    value.and_then(|v| {
+        if let Some(x) = v.as_float() {
+            return Some(x);
+        }
+        v.as_integer().map(|x| x as f64)
+    })
+}
+
 fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -751,6 +947,48 @@ fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
             .unwrap_or("")
             .trim()
             .to_string();
+        imported.ncbi_options.db = ncbi
+            .get("db")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_NCBI_DB)
+            .trim()
+            .to_string();
+        imported.ncbi_options.rettype = ncbi
+            .get("rettype")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_NCBI_RETTYPE)
+            .trim()
+            .to_string();
+        imported.ncbi_options.retmode = ncbi
+            .get("retmode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_NCBI_RETMODE)
+            .trim()
+            .to_string();
+        imported.ncbi_options.per_query =
+            toml_u32(ncbi.get("per_query")).unwrap_or(DEFAULT_NCBI_PER_QUERY);
+        imported.ncbi_options.use_history = ncbi
+            .get("use_history")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        imported.ncbi_options.delay_sec = toml_f64(ncbi.get("delay_sec"));
+    }
+
+    if let Some(output) = value.get("output").and_then(|v| v.as_table()) {
+        imported.output_options.default_header_format = output
+            .get("default_header_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_OUTPUT_HEADER_FORMAT)
+            .trim()
+            .to_string();
+        if let Some(header_formats) = output.get("header_formats").and_then(|v| v.as_table()) {
+            imported.output_options.mifish_header_format = header_formats
+                .get("mifish_pipeline")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT)
+                .trim()
+                .to_string();
+        }
     }
 
     if let Some(filters) = value.get("filters").and_then(|v| v.as_table()) {
@@ -915,6 +1153,14 @@ fn start_run(
         output_prefix: req.output_prefix.clone(),
         marker: req.markers.first().cloned().unwrap_or_default(),
         workers: req.workers,
+        ncbi_db: req.ncbi_options.db.clone(),
+        ncbi_rettype: req.ncbi_options.rettype.clone(),
+        ncbi_retmode: req.ncbi_options.retmode.clone(),
+        ncbi_per_query: req.ncbi_options.per_query,
+        ncbi_use_history: req.ncbi_options.use_history,
+        ncbi_delay_sec: req.ncbi_options.delay_sec,
+        output_default_header_format: req.output_options.default_header_format.clone(),
+        output_mifish_header_format: req.output_options.mifish_header_format.clone(),
     };
     save_gui_config_internal(&gui_config)?;
 
