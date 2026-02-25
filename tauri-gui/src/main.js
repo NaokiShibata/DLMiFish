@@ -25,6 +25,8 @@ const els = {
   pickOutput: document.querySelector("#pick-output"),
   pickPrimer: document.querySelector("#pick-primer"),
   taxidInput: document.querySelector("#taxid-input"),
+  taxonNameInput: document.querySelector("#taxon-name-input"),
+  taxonCandidates: document.querySelector("#taxon-candidates"),
   addTaxid: document.querySelector("#add-taxid"),
   clearTaxids: document.querySelector("#clear-taxids"),
   taxidList: document.querySelector("#taxid-list"),
@@ -66,7 +68,10 @@ const state = {
   files: [],
   unlisten: null,
   taxids: [],
-  markers: []
+  markers: [],
+  taxonCandidateItems: [],
+  taxonSearchSeq: 0,
+  taxonSearchTimer: null
 };
 
 function switchView(name) {
@@ -156,6 +161,82 @@ function addTaxids(raw) {
   state.taxids = Array.from(merged);
   renderTaxids();
   syncTaxidsHidden();
+}
+
+function clearTaxonCandidates() {
+  state.taxonCandidateItems = [];
+  if (els.taxonCandidates) {
+    els.taxonCandidates.innerHTML = "";
+    els.taxonCandidates.classList.remove("active");
+  }
+}
+
+function pickTaxonCandidate(item) {
+  if (!item?.taxId) return;
+  addTaxids(item.taxId);
+  renderTaxids();
+  syncTaxidsHidden();
+  updateGuidanceState();
+  els.taxonNameInput.value = `${item.scientificName} : ${item.taxId}`;
+  clearTaxonCandidates();
+  els.taxidInput.focus();
+}
+
+function renderTaxonCandidates(items) {
+  if (!els.taxonCandidates) return;
+  els.taxonCandidates.innerHTML = "";
+  state.taxonCandidateItems = Array.isArray(items) ? items : [];
+
+  if (!state.taxonCandidateItems.length) {
+    els.taxonCandidates.classList.remove("active");
+    return;
+  }
+
+  for (const item of state.taxonCandidateItems) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "taxon-candidate-item";
+    btn.textContent = `${item.scientificName} : ${item.taxId}`;
+    btn.title = `${item.scientificName} : ${item.taxId}`;
+    btn.addEventListener("click", () => pickTaxonCandidate(item));
+    li.appendChild(btn);
+    els.taxonCandidates.appendChild(li);
+  }
+  els.taxonCandidates.classList.add("active");
+}
+
+async function searchTaxonCandidatesNow() {
+  const query = els.taxonNameInput?.value?.trim() || "";
+
+  if (query.length < 2) {
+    clearTaxonCandidates();
+    return;
+  }
+
+  const seq = ++state.taxonSearchSeq;
+  try {
+    const items = await invoke("search_taxonomy", {
+      query,
+      limit: 12
+    });
+    if (seq !== state.taxonSearchSeq) return;
+    renderTaxonCandidates(items || []);
+  } catch (error) {
+    if (seq !== state.taxonSearchSeq) return;
+    clearTaxonCandidates();
+    appendLog(`[warn] taxon search failed: ${error}`);
+  }
+}
+
+function scheduleTaxonSearch() {
+  if (state.taxonSearchTimer) {
+    clearTimeout(state.taxonSearchTimer);
+  }
+  state.taxonSearchTimer = setTimeout(() => {
+    state.taxonSearchTimer = null;
+    searchTaxonCandidatesNow();
+  }, 250);
 }
 
 function renderMarkers() {
@@ -543,6 +624,8 @@ function resetForm() {
   renderTaxids();
   syncTaxidsHidden();
   els.taxidInput.value = "";
+  els.taxonNameInput.value = "";
+  clearTaxonCandidates();
   state.markers = [];
   addMarkers(els.markerSelect.value);
   document.querySelector("#f-length-min").value = "";
@@ -618,6 +701,21 @@ els.taxidInput.addEventListener("keydown", (event) => {
     addTaxids(els.taxidInput.value);
     els.taxidInput.value = "";
     updateGuidanceState();
+  }
+});
+
+els.taxonNameInput?.addEventListener("input", () => {
+  scheduleTaxonSearch();
+});
+
+els.taxonNameInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (state.taxonCandidateItems.length > 0) {
+      pickTaxonCandidate(state.taxonCandidateItems[0]);
+    }
+  } else if (event.key === "Escape") {
+    clearTaxonCandidates();
   }
 });
 

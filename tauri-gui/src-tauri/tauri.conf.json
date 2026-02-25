@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TaxonDBBuilder GUI",
+  "productName": "TaxonDBBuilderGUI",
   "version": "0.1.0",
   "identifier": "com.taxondb.builder.gui",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "TaxonDBBuilder GUI",
+        "title": "TaxonDBBuilderGUI",
         "width": 1320,
         "height": 920,
         "resizable": true
@@ -25,11 +25,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [
-      "icons/icon.png"
-    ],
-    "externalBin": [
-      "bin/taxondbbuilder"
-    ]
+    "icon": ["icons/icon.png"],
+    "resources": ["../resources/taxonomy.db"],
+    "externalBin": ["bin/taxondbbuilder"]
   }
 }

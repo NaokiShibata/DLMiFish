@@ -4,6 +4,7 @@ use chrono::Local;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const RUN_EVENT: &str = "run-event";
 const CONFIG_DIR_NAME: &str = ".taxondb_gui";
@@ -185,6 +186,13 @@ struct ImportedDbTomlConfig {
     output_options: OutputOptionsInput,
     filters: FiltersInput,
     post_prep: PostPrepInput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaxonReferenceCandidate {
+    tax_id: String,
+    scientific_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -922,6 +930,49 @@ fn toml_f64(value: Option<&toml::Value>) -> Option<f64> {
     })
 }
 
+fn resolve_taxonomy_db_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("taxonomy.db"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(tauri_gui_dir) = manifest_dir.parent() {
+        candidates.push(tauri_gui_dir.join("resources").join("taxonomy.db"));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("resources").join("taxonomy.db"));
+        candidates.push(cwd.join("tauri-gui").join("resources").join("taxonomy.db"));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("taxonomy.db"));
+            candidates.push(parent.join("resources").join("taxonomy.db"));
+            if let Some(parent2) = parent.parent() {
+                candidates.push(parent2.join("Resources").join("taxonomy.db"));
+            }
+        }
+    }
+
+    for path in &candidates {
+        if path.exists() && path.is_file() {
+            return Ok(path.clone());
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "taxonomy.db not found. Place it at tauri-gui/resources/taxonomy.db (searched: {searched})"
+    ))
+}
+
 fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -1073,6 +1124,89 @@ fn choose_db_toml_file() -> Option<String> {
         .set_title("Select db.toml")
         .pick_file()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn search_taxonomy(
+    app: AppHandle,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<TaxonReferenceCandidate>, String> {
+    let q = query.trim().to_lowercase();
+    if q.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let max_hits = limit.unwrap_or(10).clamp(1, 50);
+
+    let db_path = resolve_taxonomy_db_path(&app)?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("failed to open taxonomy.db: {e}"))?;
+
+    let mut out: Vec<TaxonReferenceCandidate> = Vec::new();
+    let limit_i64 = i64::try_from(max_hits).map_err(|e| e.to_string())?;
+    let prefix = format!("{q}%");
+    let contains = format!("%{q}%");
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT tax_id, scientific_name
+             FROM taxonomy
+             WHERE scientific_name LIKE ?1 COLLATE NOCASE
+             ORDER BY scientific_name COLLATE NOCASE
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("failed to prepare taxonomy prefix query: {e}"))?;
+
+    let prefix_rows = stmt
+        .query_map(params![prefix, limit_i64], |row| {
+            Ok(TaxonReferenceCandidate {
+                tax_id: row.get::<_, i64>(0)?.to_string(),
+                scientific_name: row.get::<_, String>(1)?,
+            })
+        })
+        .map_err(|e| format!("failed to query taxonomy prefix: {e}"))?;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    for row in prefix_rows {
+        let item = row.map_err(|e| e.to_string())?;
+        seen.insert(item.tax_id.clone());
+        out.push(item);
+    }
+
+    if out.len() < max_hits {
+        let remain = i64::try_from(max_hits - out.len()).map_err(|e| e.to_string())?;
+        let mut stmt2 = conn
+            .prepare(
+                "SELECT tax_id, scientific_name
+                 FROM taxonomy
+                 WHERE scientific_name LIKE ?1 COLLATE NOCASE
+                   AND scientific_name NOT LIKE ?2 COLLATE NOCASE
+                 ORDER BY scientific_name COLLATE NOCASE
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("failed to prepare taxonomy contains query: {e}"))?;
+
+        let rows2 = stmt2
+            .query_map(params![contains, prefix, remain], |row| {
+                Ok(TaxonReferenceCandidate {
+                    tax_id: row.get::<_, i64>(0)?.to_string(),
+                    scientific_name: row.get::<_, String>(1)?,
+                })
+            })
+            .map_err(|e| format!("failed to query taxonomy contains: {e}"))?;
+
+        for row in rows2 {
+            let item = row.map_err(|e| e.to_string())?;
+            if seen.insert(item.tax_id.clone()) {
+                out.push(item);
+            }
+            if out.len() >= max_hits {
+                break;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[tauri::command]
@@ -1355,6 +1489,7 @@ fn main() {
             choose_output_directory,
             choose_primer_file,
             choose_db_toml_file,
+            search_taxonomy,
             import_db_toml,
             open_path,
             start_run,

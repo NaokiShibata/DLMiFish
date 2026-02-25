@@ -66,6 +66,14 @@
               <div class="setup-col setup-col-left">
                 <section class="card card-taxon">
                   <h3>Taxon Input</h3>
+                  <label for="taxon-name-input">scientific name search</label>
+                  <input
+                    id="taxon-name-input"
+                    type="text"
+                    placeholder="example: Salmo salar"
+                    autocomplete="off"
+                  />
+                  <ul id="taxon-candidates" class="taxon-candidate-list"></ul>
                   <label for="taxid-input">taxid</label>
                   <div class="taxid-entry">
                     <input
@@ -153,11 +161,23 @@
                   <label for="marker">marker selector</label>
                   <div class="taxid-entry">
                     <select id="marker" required>
+                      <option value="mitogenome">mitogenome</option>
                       <option value="12s">12s</option>
                       <option value="16s">16s</option>
                       <option value="coi">coi</option>
+                      <option value="coii">coii</option>
+                      <option value="coiii">coiii</option>
                       <option value="cytb">cytb</option>
-                      <option value="mitogenome">mitogenome</option>
+                      <option value="atp6">atp6</option>
+                      <option value="atp8">atp8</option>
+                      <option value="nd1">nd1</option>
+                      <option value="nd2">nd2</option>
+                      <option value="nd3">nd3</option>
+                      <option value="nd4">nd4</option>
+                      <option value="nd4l">nd4l</option>
+                      <option value="nd5">nd5</option>
+                      <option value="nd6">nd6</option>
+                      <option value="control_region">control_region</option>
                     </select>
                     <button id="add-marker" type="button">Add</button>
                   </div>
