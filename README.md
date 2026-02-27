@@ -1,7 +1,12 @@
-# TaxonDBBuilder (Generic DB Builder)
+# TaxonDBBuilder
+
 NCBIから任意の分類群・任意のマーカーの配列を取得し、DB用のFASTAを生成するツールです。分類群は **taxid / 学名** のどちらでも指定でき、マーカーは **TOMLで定義したフレーズ群** をprefix指定で呼び出せます。
 
-本リポジトリは「分類群特異の処理」から「汎用DB FASTA生成」へ方針変更しています。解析 (抽出・フィルタリング・分類付与など)は対象外で、**DB用FASTAの生成が目的**です。
+もとにあったMiFish プライマー用のDB作成リポジトリから、「汎用DB FASTA生成」へ方針変更しています。解析 (抽出・フィルタリング・分類付与など)は対象外で、**DB用FASTAの生成が目的**です。
+
+スクリプト実行が基本ですが、GUIも作成して見ました。使用はこちらの[README](tauri-gui/README.md)を参照ください。
+
+![](tauri-gui/figures/TaxonDBBuilderGUI.drawio.png)
 
 ## 動作環境
 - Python 3.8+ (3.11+ 推奨)
@@ -138,12 +143,17 @@ file = "configs/markers_mitogenome.toml"
 - 外部定義は `[markers]` テーブルを持つ必要があります。
 - `db.toml` 側にも `[markers]` セクションが必要です（`file` のみでもOK）。
 - トップレベルの `markers_file` はサポートしていません。
-- `file` のパス解決は以下の順です:  
-  1) 絶対パス  
-  2) `db.toml` のある場所からの相対  
-  3) 実行ディレクトリからの相対  
+- `file` のパス解決は以下の順です:
+  1) 絶対パス
+  2) `db.toml` のある場所からの相対
+  3) 実行ディレクトリからの相対
   4) `taxondbbuilder.py` のある場所からの相対
 - `db.toml` 側に書いた `[markers.<id>]` は外部ファイル定義を**上書き**します。
+
+### taxon.noexp について
+- `[taxon].noexp = false` (デフォルト): `txid{taxid}[Organism]` を使って検索します。
+- `[taxon].noexp = true`: `txid{taxid}[Organism:noexp]` を使い、taxid 展開なしで検索します。
+- まずは `false` のまま使い、検索対象を taxid 直下に絞りたい場合に `true` を検討してください。
 
 ## 設定ガイド
 このツールの設定は「検索 (NCBIクエリ)」と「抽出 (GenBank feature注釈)」を分けて考えると整理しやすいです。
@@ -234,7 +244,7 @@ header_format = "mifish_pipeline"
 
 ## 逆引き (よくある目的別)
 ### Q. 目的のマーカー情報が登録されていない
-1) `markers.file` (例: `configs/markers_mitogenome.toml`)に新規マーカーを追加  
+1) `markers.file` (例: `configs/markers_mitogenome.toml`)に新規マーカーを追加
    もしくは `db.toml` 側の `[markers.<id>]` で追加
 2) `aliases` を付けてCLIから指定できるようにする
 3) `phrases/terms` を検索用に、`region_patterns` を抽出用に設定
@@ -276,6 +286,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 | `--dump-gb` | なし | GenBankチャンクを保存 (キャッシュ) |
 | `--from-gb` | なし | 保存済みGenBankチャンクから抽出 |
 | `--resume` | なし | キャッシュを優先して利用 |
+| `--dry-run` | なし | 実際の取得・抽出を行わず、生成されるNCBIクエリのみ表示 |
 | `--post-prep` | `db.toml` の `[post_prep]` | 生成FASTAに後処理を有効化 |
 | `--post-prep-step` | `db.toml` の `[post_prep]` | 実行する後処理カテゴリを選択 (`primer_trim` / `length_filter` / `duplicate_report`) |
 | `--post-prep-primer-set` | `[post_prep].primer_file` | primer_trim で使う primer_set をCLIから指定 (複数可・config上書き) |
@@ -316,6 +327,11 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --from-gb Re
 中断後の再開 (キャッシュ利用):
 ```bash
 python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
+```
+
+生成されるNCBIクエリだけを確認 (`--dry-run`):
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dry-run
 ```
 
 post-prep を有効化 (primer trim + 長さフィルタ + 重複ACCレポート):
@@ -462,3 +478,46 @@ reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
 
 ## Legacy
 旧パイプラインは削除済みです。現行方針では**DB用FASTA生成のみ**を対象とします。
+
+## 補助スクリプト (GUI向け)
+- `tauri-gui/scripts/build_sidecar.py`: Tauri GUI 用の sidecar バイナリを作成/配置するスクリプトです。
+- `--repo-root` でリポジトリルート、`--tauri-root` で `tauri-gui` の場所を指定できます。
+- `--stub` を付けると実バイナリの代わりに stub を作成し、オフラインの `cargo check` 用に利用できます。
+- 詳細手順は `tauri-gui/README.md` を参照してください。
+
+## tauri-gui の実行方法
+`tauri-gui` は GUI から `taxondbbuilder build` を実行するための Tauri アプリです。
+
+### 1. Python実行環境を作成 (uv)
+リポジトリルートで実行します。
+```bash
+uv python install 3.11
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install pyinstaller
+```
+`tauri-gui/` にいる状態で実行する場合は `uv pip install -r ../requirements.txt` を使ってください。
+
+### 2. セットアップ
+```bash
+cd tauri-gui
+npm install
+```
+
+### 3. sidecar バイナリを作成
+`tauri-gui/` から実行します。
+```bash
+python3 scripts/build_sidecar.py --repo-root .. --tauri-root .
+```
+
+### 4. 開発モードで起動
+```bash
+npm run tauri:dev
+```
+
+### 補足
+- sidecar は `src-tauri/bin/` に配置されます。
+- `scripts/build_sidecar.py` は `PyInstaller` が必要です（`.venv` を有効化して `uv pip install pyinstaller`）。
+- 開発時は `TAXONDBBUILDER_BIN` 環境変数で sidecar の絶対パスを直接指定することもできます（ディレクトリではなく実行ファイルを指定）。
+- Linux のビルド依存関係は `tauri-gui/README.md` の `Linux build dependencies` を参照してください。

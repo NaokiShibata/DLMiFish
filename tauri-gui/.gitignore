@@ -1,0 +1,24 @@
+# Node/Vite artifacts
+node_modules/
+dist/
+
+# Python env for sidecar build
+.venv/
+scripts/__pycache__/
+
+# Tauri/Rust build artifacts
+src-tauri/target/
+
+# Generated sidecar binaries (keep README.md in this dir)
+src-tauri/bin/taxondbbuilder-*
+!src-tauri/bin/README.md
+
+# Local logs / caches
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vite/
+
+# OS files
+.DS_Store
+Thumbs.db
