@@ -6,9 +6,9 @@
 
 ## 概要
 
-(1)GUIアプリをビルドして配列ダウンロードを実行可能です。また、(2)CLI (`taxondbbuilder.py`) を直接実行することもできます。基本的にサーバーは不要です。
+GUIアプリをビルドして配列ダウンロードを実行可能です。基本的にサーバーは不要です。
 
-## 1. GUIアプリとして使う
+## GUIアプリとして使う
 
 ### 前提ツールのインストール
 
@@ -66,8 +66,32 @@ sudo apt-get install -y \
 
 ### ビルド手順
 
-`taxonomy.db` の生成・更新手順は `../docs/taxonomy-db-build.md` を参照してください。
+`taxonomy.db` の生成・更新手順は [taxonomy-db-build](../docs/taxonomy-db-build.md) を参照してください。
 GUI は起動時に `taxonomy.db` を探索します（例: `tauri-gui/resources/taxonomy.db`）。
+
+`tools/build_taxonomy_db.py` を使って `taxonomy.db` を生成する場合は、リポジトリルートで以下を実行します。
+
+```bash
+# names.dmp から CSV と SQLite を一括生成
+python3 tools/build_taxonomy_db.py all \
+  --names-dmp /path/to/taxdump/names.dmp \
+  --out-csv tauri-gui/resources/taxid_scientific_name.csv \
+  --out-db tauri-gui/resources/taxonomy.db
+```
+
+個別実行する場合:
+
+```bash
+# 1) names.dmp -> CSV
+python3 tools/build_taxonomy_db.py extract-csv \
+  --names-dmp /path/to/taxdump/names.dmp \
+  --out-csv tauri-gui/resources/taxid_scientific_name.csv
+
+# 2) CSV -> taxonomy.db
+python3 tools/build_taxonomy_db.py build-sqlite \
+  --in-csv tauri-gui/resources/taxid_scientific_name.csv \
+  --out-db tauri-gui/resources/taxonomy.db
+```
 
 > GUI実行経路はRust統合済みのため、GUIビルド/実行だけであればPythonランタイムは不要です。
 
@@ -197,13 +221,3 @@ primer_set = ["mifish_u","mifish_ev2","mifish_u2","mifish_l"]
 内容はおおよそコマンドライン実行と同様です。また、GUIの**OPEN**をクリックするとエディタでファイルを開くことが可能です。
 
 ![](figures/TaxonDBBuilderGUI04.drawio.png)
-
-## 2. コマンドラインとして使う
-
-CLI はリポジトリ直下の `taxondbbuilder.py` を直接実行します。
-
-```bash
-python3 ../taxondbbuilder.py --help
-python3 ../taxondbbuilder.py list-markers -c ../configs/db.toml
-python3 ../taxondbbuilder.py build -c ../configs/db.toml -t 117570 -m 12s --dry-run
-```
