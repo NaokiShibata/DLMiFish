@@ -6,7 +6,7 @@
 
 ## 概要
 
-(1)GUIアプリをビルドして配列ダウンロードを実行可能です。また、(2)sidecarバイナリをコマンドラインで実行することもできます。基本的にサーバーは不要です。
+(1)GUIアプリをビルドして配列ダウンロードを実行可能です。また、(2)CLI (`taxondbbuilder.py`) を直接実行することもできます。基本的にサーバーは不要です。
 
 ## 1. GUIアプリとして使う
 
@@ -66,18 +66,10 @@ sudo apt-get install -y \
 
 ### ビルド手順
 
-リポジトリルート (`TaxonDBBuilder/`) で、`uv` による仮想環境作成と必要パッケージの導入を行います。
-
-```bash
-uv python install 3.11
-uv venv --python 3.11
-source .venv/bin/activate
-uv pip install -r requirements.txt
-uv pip install pyinstaller
-```
-
 `taxonomy.db` の生成・更新手順は `../docs/taxonomy-db-build.md` を参照してください。
-GUI は `tauri-gui/resources/taxonomy.db` を固定参照します。
+GUI は起動時に `taxonomy.db` を探索します（例: `tauri-gui/resources/taxonomy.db`）。
+
+> GUI実行経路はRust統合済みのため、GUIビルド/実行だけであればPythonランタイムは不要です。
 
 続けて `tauri-gui/` でGUIをビルドします。
 
@@ -87,7 +79,6 @@ cd tauri-gui
 # 依存パッケージをすべてインストール
 npm install
 # Build
-python3 scripts/build_sidecar.py --repo-root .. --tauri-root .
 npm run tauri:build
 ```
 
@@ -209,13 +200,10 @@ primer_set = ["mifish_u","mifish_ev2","mifish_u2","mifish_l"]
 
 ## 2. コマンドラインとして使う
 
-`tauri-gui/src-tauri/bin/` の sidecar を直接実行できます。
+CLI はリポジトリ直下の `taxondbbuilder.py` を直接実行します。
 
 ```bash
-./src-tauri/bin/taxondbbuilder-<target-triple> --help
-./src-tauri/bin/taxondbbuilder-<target-triple> list-markers -c ../configs/db.toml
-./src-tauri/bin/taxondbbuilder-<target-triple> build -c ../configs/db.toml -t 117570 -m 12s --dry-run
+python3 ../taxondbbuilder.py --help
+python3 ../taxondbbuilder.py list-markers -c ../configs/db.toml
+python3 ../taxondbbuilder.py build -c ../configs/db.toml -t 117570 -m 12s --dry-run
 ```
-
-> [!IMPORTANT]
-> sidecar はCLIです。単体でGUIは起動しません。

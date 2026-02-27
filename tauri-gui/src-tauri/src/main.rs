@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod taxondb_post_prep;
+mod taxondb_runner;
+
 use chrono::Local;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -7,15 +10,20 @@ use rfd::FileDialog;
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
+use taxondb_post_prep::{
+    apply_length_filter, apply_primer_trim, combine_primer_sets, count_fasta_records,
+    load_primer_sets,
+};
+use taxondb_runner::{run_build, BuildParams};
 
 const RUN_EVENT: &str = "run-event";
 const CONFIG_DIR_NAME: &str = ".taxondb_gui";
@@ -24,7 +32,8 @@ const DEFAULT_NCBI_DB: &str = "nucleotide";
 const DEFAULT_NCBI_RETTYPE: &str = "gb";
 const DEFAULT_NCBI_RETMODE: &str = "text";
 const DEFAULT_NCBI_PER_QUERY: u32 = 100;
-const DEFAULT_OUTPUT_HEADER_FORMAT: &str = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
+const DEFAULT_OUTPUT_HEADER_FORMAT: &str =
+    "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
 const DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT: &str = "gb|{acc_id}|{organism}";
 
 static MARKERS_TEMPLATE: &str = include_str!("../../resources/templates/markers_mitogenome.toml");
@@ -554,117 +563,114 @@ fn prepare_job_dir(output_root: &Path) -> Result<(String, PathBuf), String> {
     Err("could not allocate job directory".to_string())
 }
 
-fn resolve_sidecar_path() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("TAXONDBBUILDER_BIN") {
-        let p = PathBuf::from(path.trim());
-        if !p.exists() {
-            return Err(format!(
-                "TAXONDBBUILDER_BIN is set but path does not exist: {}",
-                p.display()
-            ));
+fn toml_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn append_log_line(log_path: &Path, line: &str) -> Result<(), String> {
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("failed to open log {}: {e}", log_path.display()))?;
+    writeln!(f, "{line}").map_err(|e| format!("failed to append log {}: {e}", log_path.display()))
+}
+
+fn run_post_prep_rust(
+    output_path: &Path,
+    log_path: &Path,
+    config_dir: &Path,
+    req: &RunRequest,
+) -> Result<(), String> {
+    if !req.post_prep.enable {
+        return Ok(());
+    }
+
+    let before = count_fasta_records(output_path)?;
+    append_log_line(
+        log_path,
+        &format!("# kept records before post_prep: {before}"),
+    )?;
+
+    let has_length_filter =
+        req.post_prep.sequence_length_min.is_some() || req.post_prep.sequence_length_max.is_some();
+
+    let mut steps = req.post_prep.steps.clone();
+    if steps.is_empty() {
+        if !req.post_prep.primer_set.is_empty() {
+            steps.push("primer_trim".to_string());
         }
-        if !p.is_file() {
-            return Err(format!(
-                "TAXONDBBUILDER_BIN must point to a file, got: {}",
-                p.display()
-            ));
+        if has_length_filter {
+            steps.push("length_filter".to_string());
         }
-        return Ok(p);
+        steps.push("duplicate_report".to_string());
     }
 
-    let target_triple = option_env!("TAURI_ENV_TARGET_TRIPLE").unwrap_or("unknown-target");
-    let mut search_dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        search_dirs.push(cwd.join("bin"));
-        search_dirs.push(cwd.join("src-tauri/bin"));
-        search_dirs.push(cwd.join("tauri-gui/src-tauri/bin"));
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    search_dirs.push(manifest_dir.join("bin"));
-    if let Some(parent) = manifest_dir.parent() {
-        search_dirs.push(parent.join("bin"));
-        search_dirs.push(parent.join("src-tauri/bin"));
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            search_dirs.push(parent.to_path_buf());
-            search_dirs.push(parent.join("bin"));
-        }
-    }
-
-    search_dirs.sort();
-    search_dirs.dedup();
-
-    let mut candidate_names: Vec<String> = Vec::new();
-    #[cfg(target_os = "windows")]
-    {
-        candidate_names.push(format!("taxondbbuilder-{target_triple}.exe"));
-        candidate_names.push("taxondbbuilder.exe".to_string());
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        candidate_names.push(format!("taxondbbuilder-{target_triple}"));
-        candidate_names.push("taxondbbuilder".to_string());
-    }
-
-    for dir in &search_dirs {
-        for name in &candidate_names {
-            let path = dir.join(name);
-            if path.exists() && path.is_file() {
-                return Ok(path);
+    for step in steps {
+        match step.as_str() {
+            "primer_trim" => {
+                if req.post_prep.primer_set.is_empty() {
+                    append_log_line(
+                        log_path,
+                        "# post_prep primer trim: skipped (primer_set is empty)",
+                    )?;
+                    continue;
+                }
+                let primer_file = if req.post_prep.primer_file.trim().is_empty() {
+                    config_dir.join("primers.toml")
+                } else {
+                    PathBuf::from(req.post_prep.primer_file.trim())
+                };
+                let all_sets = load_primer_sets(&primer_file)?;
+                let (forward, reverse) = combine_primer_sets(&all_sets, &req.post_prep.primer_set)?;
+                let stats = apply_primer_trim(output_path, &forward, &reverse)?;
+                append_log_line(
+                    log_path,
+                    &format!(
+                        "# post_prep primer trim: before={} after={} removed={} trimmed_both={} trimmed_left_only={} trimmed_right_only={} untrimmed={} dropped_empty={} canonical_orientation={} reverse_orientation={}",
+                        stats.before,
+                        stats.after,
+                        stats.removed,
+                        stats.trimmed_both,
+                        stats.trimmed_left_only,
+                        stats.trimmed_right_only,
+                        stats.untrimmed,
+                        stats.dropped_empty,
+                        stats.canonical_orientation,
+                        stats.reverse_orientation
+                    ),
+                )?;
+            }
+            "length_filter" => {
+                let stats = apply_length_filter(
+                    output_path,
+                    req.post_prep.sequence_length_min,
+                    req.post_prep.sequence_length_max,
+                )?;
+                append_log_line(
+                    log_path,
+                    &format!(
+                        "# post_prep length filter: before={} after={} removed={}",
+                        stats.before, stats.after, stats.removed
+                    ),
+                )?;
+            }
+            "duplicate_report" => {
+                append_log_line(
+                    log_path,
+                    "# post_prep duplicate_acc_report: skipped (not yet ported to rust)",
+                )?;
+            }
+            other => {
+                append_log_line(
+                    log_path,
+                    &format!("# post_prep {other}: skipped (unknown step)"),
+                )?;
             }
         }
     }
 
-    for dir in &search_dirs {
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        let mut matches: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .filter(|path| {
-                let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
-                    return false;
-                };
-                if !name.starts_with("taxondbbuilder-") {
-                    return false;
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    return name.ends_with(".exe");
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    true
-                }
-            })
-            .collect();
-        matches.sort();
-        if let Some(path) = matches.first() {
-            return Ok(path.clone());
-        }
-    }
-
-    if let Ok(path) = which::which("taxondbbuilder") {
-        return Ok(path);
-    }
-
-    let dirs = search_dirs
-        .iter()
-        .map(|d| d.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(format!(
-        "taxondbbuilder sidecar not found. Set TAXONDBBUILDER_BIN or place binary under src-tauri/bin/ with Tauri target-triple suffix. searched=[{dirs}]"
-    ))
-}
-
-fn toml_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    Ok(())
 }
 
 fn write_job_config(req: &RunRequest, config_dir: &Path) -> Result<PathBuf, String> {
@@ -831,15 +837,6 @@ fn collect_files(results_dir: &Path, extra: &[PathBuf]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
-}
-
-fn read_pipe_lines<R: Read + Send + 'static>(reader: R, source: &'static str, app: AppHandle) {
-    thread::spawn(move || {
-        let buffered = BufReader::new(reader);
-        for line in buffered.lines().map_while(Result::ok) {
-            emit_event(&app, log_event(format!("[{source}] {line}")));
-        }
-    });
 }
 
 fn tail_log_once(
@@ -1070,7 +1067,9 @@ fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
         if !imported.post_prep.primer_file.is_empty() && !imported.post_prep.primer_set.is_empty() {
             steps.push("primer_trim".to_string());
         }
-        if imported.post_prep.sequence_length_min.is_some() || imported.post_prep.sequence_length_max.is_some() {
+        if imported.post_prep.sequence_length_min.is_some()
+            || imported.post_prep.sequence_length_max.is_some()
+        {
             steps.push("length_filter".to_string());
         }
         steps.push("duplicate_report".to_string());
@@ -1321,66 +1320,7 @@ fn start_run(
     ));
     let log_path = PathBuf::from(format!("{}.log", output_file.to_string_lossy()));
 
-    let sidecar = resolve_sidecar_path()?;
-
-    let mut args: Vec<String> = vec!["build".to_string()];
-    args.push("-c".to_string());
-    args.push(to_abs_string(&config_path));
-
-    for taxid in &req.taxids {
-        args.push("-t".to_string());
-        args.push(taxid.trim().to_string());
-    }
-
-    for marker in &req.markers {
-        args.push("-m".to_string());
-        args.push(marker.trim().to_string());
-    }
-
-    args.push("--out".to_string());
-    args.push(to_abs_string(&output_file));
-    args.push("--dump-gb".to_string());
-    args.push(to_abs_string(&gb_dir));
-    args.push("--output-prefix".to_string());
-    args.push(req.output_prefix.clone());
-    args.push("--workers".to_string());
-    args.push(req.workers.max(1).to_string());
-
-    if req.resume {
-        args.push("--resume".to_string());
-    }
-
-    if req.post_prep.enable {
-        args.push("--post-prep".to_string());
-        for step in &req.post_prep.steps {
-            args.push("--post-prep-step".to_string());
-            args.push(step.clone());
-        }
-        for set in &req.post_prep.primer_set {
-            args.push("--post-prep-primer-set".to_string());
-            args.push(set.clone());
-        }
-    }
-
-    let mut command = Command::new(&sidecar);
-    command
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(&job_dir);
-
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to start sidecar {}: {e}", sidecar.display()))?;
-
-    if let Some(stdout) = child.stdout.take() {
-        read_pipe_lines(stdout, "stdout", app.clone());
-    }
-    if let Some(stderr) = child.stderr.take() {
-        read_pipe_lines(stderr, "stderr", app.clone());
-    }
-
-    let child_arc = Arc::new(Mutex::new(Some(child)));
+    let child_arc = Arc::new(Mutex::new(None));
     let cancelled = Arc::new(AtomicBool::new(false));
 
     {
@@ -1399,8 +1339,16 @@ fn start_run(
     let run_slot = state.run.clone();
     let app_for_thread = app.clone();
     let log_path_for_thread = log_path.clone();
+    let output_file_for_thread = output_file.clone();
+    let config_dir_for_thread = config_dir.clone();
+    let req_for_thread = req.clone();
     let results_dir_for_thread = results_dir.clone();
     let job_dir_for_thread = job_dir.clone();
+    let config_path_for_thread = config_path.clone();
+    let gb_dir_for_thread = gb_dir.clone();
+    let marker_for_thread = req.markers.clone();
+    let taxids_for_thread = req.taxids.clone();
+    let resume_for_thread = req.resume;
     let taxid_total = req.taxids.len();
     let post_steps_total = if req.post_prep.enable {
         req.post_prep.steps.len().max(1)
@@ -1411,7 +1359,27 @@ fn start_run(
     thread::spawn(move || {
         let mut parser = ProgressParser::new(taxid_total, post_steps_total);
         let mut offset: u64 = 0;
-        let exit_code: i32 = loop {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let cancelled_for_worker = cancelled.clone();
+        let output_file_for_worker = output_file_for_thread.clone();
+        let log_path_for_worker = log_path_for_thread.clone();
+        thread::spawn(move || {
+            let build_params = BuildParams {
+                config_path: config_path_for_thread,
+                taxids: taxids_for_thread,
+                markers: marker_for_thread,
+                output_file: output_file_for_worker,
+                dump_gb_dir: gb_dir_for_thread,
+                resume: resume_for_thread,
+            };
+            let _ = done_tx.send(run_build(
+                &build_params,
+                &log_path_for_worker,
+                cancelled_for_worker.as_ref(),
+            ));
+        });
+
+        let mut exit_code: i32 = loop {
             if let Err(err) = tail_log_once(
                 &app_for_thread,
                 &mut parser,
@@ -1421,29 +1389,33 @@ fn start_run(
                 emit_event(&app_for_thread, error_event(err));
             }
 
-            let status: Option<i32> = {
-                let mut guard = child_arc.lock().ok();
-                if let Some(ref mut guard) = guard {
-                    if let Some(child) = guard.as_mut() {
-                        child
-                            .try_wait()
-                            .ok()
-                            .flatten()
-                            .map(|s| s.code().unwrap_or(1))
-                    } else {
-                        Some(1)
-                    }
-                } else {
-                    Some(1)
+            if cancelled.load(Ordering::Relaxed) {
+                break 1;
+            }
+            match done_rx.try_recv() {
+                Ok(Ok(())) => break 0,
+                Ok(Err(err)) => {
+                    emit_event(&app_for_thread, error_event(err));
+                    break 1;
                 }
-            };
-
-            if let Some(code) = status {
-                break code;
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break 1,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
 
             thread::sleep(Duration::from_millis(300));
         };
+
+        if exit_code == 0 {
+            if let Err(err) = run_post_prep_rust(
+                &output_file_for_thread,
+                &log_path_for_thread,
+                &config_dir_for_thread,
+                &req_for_thread,
+            ) {
+                emit_event(&app_for_thread, error_event(err));
+                exit_code = 1;
+            }
+        }
 
         let _ = tail_log_once(
             &app_for_thread,
@@ -1476,7 +1448,7 @@ fn start_run(
         config_path: to_abs_string(&config_path),
         output_path: to_abs_string(&output_file),
         log_path: to_abs_string(&log_path),
-        command: format!("{} {}", sidecar.display(), args.join(" ")),
+        command: "rust-runner (integrated)".to_string(),
     })
 }
 

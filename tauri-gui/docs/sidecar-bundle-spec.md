@@ -1,32 +1,23 @@
-# Sidecar Bundle Spec (v1)
+# Runner Bundle Spec (v3)
 
 ## Goal
 
-Bundle standalone `taxondbbuilder` executable per OS and launch it from Tauri.
+Run the build pipeline directly in Rust from the Tauri process (no sidecar / no python runtime for GUI path).
 
 ## Path layout
 
-- `src-tauri/bin/taxondbbuilder-<target-triple>`
-- `src-tauri/bin/taxondbbuilder-<target-triple>.exe` (Windows)
+- No external runner binary/script is required.
 
 ## Build command
 
 From `tauri-gui/`:
 
 ```bash
-python scripts/build_sidecar.py --repo-root .. --tauri-root .
-```
-
-Offline check-only mode:
-
-```bash
-python scripts/build_sidecar.py --repo-root .. --tauri-root . --stub
+npm run tauri:build
 ```
 
 ## Implementation details
 
-- Uses PyInstaller (`--onefile`) on each runner OS
-- Detects host target triple from `rustc -vV`
-- Copies produced binary from `../dist/` into `src-tauri/bin/` with
-  Tauri-required target-triple suffix
-- `tauri.conf.json` references these binaries via `bundle.externalBin`
+- `start_run` triggers integrated Rust runner (`taxondb_runner` module).
+- NCBI fetch (`esearch`/`efetch`) + GenBank parse + FASTA emit are handled in Rust.
+- Post-prep `primer_trim` / `length_filter` is executed in Rust after build (duplicate report is pending migration).
