@@ -47,6 +47,10 @@ reverse = ["CATAGTGGGGTATCTAATCCCAGTTTG"]
 forward = ["YGGTAAATCYTGTGCCAGC"]
 reverse = ["AAGTCCTTAGAGTTTYAAGCGTT"]
 
+[primer_sets.libird]
+forward = ["AGARATGGGCTACATT"]
+reverse = ["CTTACCTTGTTACGACTT"]
+
 # Aquatic insects
 [primer_sets.lco1490_hco2198]
 forward = ["GGTCAACAAATCATAAAGATATTGG"]
@@ -118,6 +122,10 @@ reverse = ["GTGTCCCTGATTCTATCATGAATAG"]
 [primer_sets.bto_cytb]
 forward = ["TGAAACTTCGGATCACTCCTGG"]
 reverse = ["TACTAGGGCAAGCTCATTCTAGC"]
+
+[primer_sets.barba_cytb]
+forward = ["GCCTCCTTCTTTTTTATCTGCCT"]
+reverse = ["AGGGTTGCATTGTCTACTGAGA"]
 
 [primer_sets.bto_nd5]
 forward = ["GTCACCAACTGGCACTGGA"]

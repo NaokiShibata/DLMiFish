@@ -21,7 +21,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use taxondb_post_prep::{
     apply_length_filter, apply_primer_trim, combine_primer_sets, count_fasta_records,
-    load_primer_sets,
+    load_primer_sets, write_duplicate_acc_reports_csv, PrimerTrimOptions,
 };
 use taxondb_runner::{run_build, BuildParams};
 
@@ -121,6 +121,21 @@ struct PostPrepInput {
     steps: Vec<String>,
     sequence_length_min: Option<u32>,
     sequence_length_max: Option<u32>,
+    primer_max_mismatch: Option<u32>,
+    primer_max_error_rate: Option<f64>,
+    primer_min_overlap_bp: Option<u32>,
+    primer_min_overlap_ratio: Option<f64>,
+    primer_end_max_offset: Option<u32>,
+    primer_trim_mode: Option<String>,
+    primer_keep_retained_fasta: Option<bool>,
+    primer_iter_enable: Option<bool>,
+    primer_iter_max_rounds: Option<u32>,
+    primer_iter_stop_delta: Option<f64>,
+    primer_iter_target_conf: Option<f64>,
+    primer_recheck_tool: Option<String>,
+    primer_recheck_min_identity: Option<f64>,
+    primer_recheck_min_query_cov: Option<f64>,
+    primer_sidecar_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -623,11 +638,43 @@ fn run_post_prep_rust(
                 };
                 let all_sets = load_primer_sets(&primer_file)?;
                 let (forward, reverse) = combine_primer_sets(&all_sets, &req.post_prep.primer_set)?;
-                let stats = apply_primer_trim(output_path, &forward, &reverse)?;
+                let trim_opts = PrimerTrimOptions {
+                    trim_mode: req
+                        .post_prep
+                        .primer_trim_mode
+                        .clone()
+                        .unwrap_or_else(|| "one_or_both".to_string()),
+                    max_mismatch: req.post_prep.primer_max_mismatch.unwrap_or(0) as usize,
+                    max_error_rate: req.post_prep.primer_max_error_rate.unwrap_or(0.0),
+                    min_overlap_bp: req.post_prep.primer_min_overlap_bp.map(|v| v as usize),
+                    min_overlap_ratio: req.post_prep.primer_min_overlap_ratio.unwrap_or(1.0),
+                    end_max_offset: req.post_prep.primer_end_max_offset.unwrap_or(0) as usize,
+                    keep_retained_fasta: req.post_prep.primer_keep_retained_fasta.unwrap_or(true),
+                    iter_enable: req.post_prep.primer_iter_enable.unwrap_or(false),
+                    iter_max_rounds: req.post_prep.primer_iter_max_rounds.unwrap_or(3) as usize,
+                    iter_stop_delta: req.post_prep.primer_iter_stop_delta.unwrap_or(0.002),
+                    iter_target_conf: req.post_prep.primer_iter_target_conf.unwrap_or(0.98),
+                    sidecar_format: req
+                        .post_prep
+                        .primer_sidecar_format
+                        .clone()
+                        .unwrap_or_else(|| "tsv".to_string()),
+                    recheck_tool: req
+                        .post_prep
+                        .primer_recheck_tool
+                        .clone()
+                        .unwrap_or_else(|| "off".to_string()),
+                    recheck_min_identity: req.post_prep.primer_recheck_min_identity.unwrap_or(0.85),
+                    recheck_min_query_cov: req
+                        .post_prep
+                        .primer_recheck_min_query_cov
+                        .unwrap_or(0.7),
+                };
+                let stats = apply_primer_trim(output_path, &forward, &reverse, &trim_opts)?;
                 append_log_line(
                     log_path,
                     &format!(
-                        "# post_prep primer trim: before={} after={} removed={} trimmed_both={} trimmed_left_only={} trimmed_right_only={} untrimmed={} dropped_empty={} canonical_orientation={} reverse_orientation={}",
+                        "# post_prep primer trim: before={} after={} removed={} trimmed_both={} trimmed_left_only={} trimmed_right_only={} untrimmed={} dropped_empty={} canonical_orientation={} reverse_orientation={} confidence_high={} confidence_medium={} confidence_low={} rounds_run={} best_round={} high_conf_rate={:.4}",
                         stats.before,
                         stats.after,
                         stats.removed,
@@ -637,7 +684,38 @@ fn run_post_prep_rust(
                         stats.untrimmed,
                         stats.dropped_empty,
                         stats.canonical_orientation,
-                        stats.reverse_orientation
+                        stats.reverse_orientation,
+                        stats.confidence_high,
+                        stats.confidence_medium,
+                        stats.confidence_low,
+                        stats.rounds_run,
+                        stats.best_round,
+                        stats.high_conf_rate
+                    ),
+                )?;
+                if let Some(sidecar_path) = &stats.sidecar_path {
+                    append_log_line(
+                        log_path,
+                        &format!("# post_prep primer sidecar: {sidecar_path}"),
+                    )?;
+                }
+                if let Some(retained_path) = &stats.retained_path {
+                    append_log_line(
+                        log_path,
+                        &format!("# post_prep primer retained_fasta: {retained_path}"),
+                    )?;
+                }
+                append_log_line(
+                    log_path,
+                    &format!(
+                        "# post_prep primer recheck: tool={} attempted={} rescued={} error={}",
+                        trim_opts.recheck_tool,
+                        stats.recheck_attempted,
+                        stats.recheck_rescued,
+                        stats
+                            .recheck_error
+                            .clone()
+                            .unwrap_or_else(|| "none".to_string())
                     ),
                 )?;
             }
@@ -656,10 +734,44 @@ fn run_post_prep_rust(
                 )?;
             }
             "duplicate_report" => {
-                append_log_line(
-                    log_path,
-                    "# post_prep duplicate_acc_report: skipped (not yet ported to rust)",
-                )?;
+                let mut header_formats = vec![
+                    req.output_options.default_header_format.clone(),
+                    req.output_options.mifish_header_format.clone(),
+                ];
+                header_formats.retain(|s| !s.trim().is_empty());
+                header_formats.sort();
+                header_formats.dedup();
+
+                let (records_csv, groups_csv, stats_opt, reason_opt) =
+                    write_duplicate_acc_reports_csv(output_path, &header_formats)?;
+                if let Some(reason) = reason_opt {
+                    append_log_line(
+                        log_path,
+                        &format!("# post_prep duplicate_acc_report: skipped ({reason})"),
+                    )?;
+                } else if let (Some(stats), Some(records_csv), Some(groups_csv)) =
+                    (stats_opt, records_csv, groups_csv)
+                {
+                    append_log_line(
+                        log_path,
+                        &format!(
+                            "# post_prep duplicate_acc_report: total={} parsed={} unparsed={} groups={} duplicate_records={} cross_organism_groups={} records_csv={} groups_csv={}",
+                            stats.total_records,
+                            stats.parsed_records,
+                            stats.unparsed_records,
+                            stats.duplicate_groups,
+                            stats.duplicate_records,
+                            stats.cross_organism_groups,
+                            records_csv.display(),
+                            groups_csv.display()
+                        ),
+                    )?;
+                } else {
+                    append_log_line(
+                        log_path,
+                        "# post_prep duplicate_acc_report: skipped (unexpected empty result)",
+                    )?;
+                }
             }
             other => {
                 append_log_line(
@@ -810,6 +922,60 @@ fn write_job_config(req: &RunRequest, config_dir: &Path) -> Result<PathBuf, Stri
     }
     if let Some(v) = req.post_prep.sequence_length_max {
         toml.push_str(&format!("sequence_length_max = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_max_mismatch {
+        toml.push_str(&format!("primer_max_mismatch = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_max_error_rate {
+        toml.push_str(&format!("primer_max_error_rate = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_min_overlap_bp {
+        toml.push_str(&format!("primer_min_overlap_bp = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_min_overlap_ratio {
+        toml.push_str(&format!("primer_min_overlap_ratio = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_end_max_offset {
+        toml.push_str(&format!("primer_end_max_offset = {}\n", v));
+    }
+    if let Some(v) = &req.post_prep.primer_trim_mode {
+        if !v.trim().is_empty() {
+            toml.push_str(&format!("primer_trim_mode = {}\n", toml_quote(v.trim())));
+        }
+    }
+    if let Some(v) = req.post_prep.primer_keep_retained_fasta {
+        toml.push_str(&format!("primer_keep_retained_fasta = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_iter_enable {
+        toml.push_str(&format!("primer_iter_enable = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_iter_max_rounds {
+        toml.push_str(&format!("primer_iter_max_rounds = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_iter_stop_delta {
+        toml.push_str(&format!("primer_iter_stop_delta = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_iter_target_conf {
+        toml.push_str(&format!("primer_iter_target_conf = {}\n", v));
+    }
+    if let Some(v) = &req.post_prep.primer_recheck_tool {
+        if !v.trim().is_empty() {
+            toml.push_str(&format!("primer_recheck_tool = {}\n", toml_quote(v.trim())));
+        }
+    }
+    if let Some(v) = req.post_prep.primer_recheck_min_identity {
+        toml.push_str(&format!("primer_recheck_min_identity = {}\n", v));
+    }
+    if let Some(v) = req.post_prep.primer_recheck_min_query_cov {
+        toml.push_str(&format!("primer_recheck_min_query_cov = {}\n", v));
+    }
+    if let Some(v) = &req.post_prep.primer_sidecar_format {
+        if !v.trim().is_empty() {
+            toml.push_str(&format!(
+                "primer_sidecar_format = {}\n",
+                toml_quote(v.trim())
+            ));
+        }
     }
 
     let config_path = config_dir.join("db.toml");
@@ -1062,6 +1228,47 @@ fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
         imported.post_prep.primer_set = toml_string_list(post.get("primer_set"));
         imported.post_prep.sequence_length_min = toml_u32(post.get("sequence_length_min"));
         imported.post_prep.sequence_length_max = toml_u32(post.get("sequence_length_max"));
+        imported.post_prep.primer_max_mismatch = toml_u32(post.get("primer_max_mismatch"));
+        imported.post_prep.primer_max_error_rate =
+            post.get("primer_max_error_rate").and_then(|v| v.as_float());
+        imported.post_prep.primer_min_overlap_bp = toml_u32(post.get("primer_min_overlap_bp"));
+        imported.post_prep.primer_min_overlap_ratio = post
+            .get("primer_min_overlap_ratio")
+            .and_then(|v| v.as_float());
+        imported.post_prep.primer_end_max_offset = toml_u32(post.get("primer_end_max_offset"));
+        imported.post_prep.primer_trim_mode = post
+            .get("primer_trim_mode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        imported.post_prep.primer_keep_retained_fasta = post
+            .get("primer_keep_retained_fasta")
+            .and_then(|v| v.as_bool());
+        imported.post_prep.primer_iter_enable =
+            post.get("primer_iter_enable").and_then(|v| v.as_bool());
+        imported.post_prep.primer_iter_max_rounds = toml_u32(post.get("primer_iter_max_rounds"));
+        imported.post_prep.primer_iter_stop_delta = post
+            .get("primer_iter_stop_delta")
+            .and_then(|v| v.as_float());
+        imported.post_prep.primer_iter_target_conf = post
+            .get("primer_iter_target_conf")
+            .and_then(|v| v.as_float());
+        imported.post_prep.primer_recheck_tool = post
+            .get("primer_recheck_tool")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        imported.post_prep.primer_recheck_min_identity = post
+            .get("primer_recheck_min_identity")
+            .and_then(|v| v.as_float());
+        imported.post_prep.primer_recheck_min_query_cov = post
+            .get("primer_recheck_min_query_cov")
+            .and_then(|v| v.as_float());
+        imported.post_prep.primer_sidecar_format = post
+            .get("primer_sidecar_format")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let mut steps: Vec<String> = Vec::new();
         if !imported.post_prep.primer_file.is_empty() && !imported.post_prep.primer_set.is_empty() {
