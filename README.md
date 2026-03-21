@@ -1,6 +1,6 @@
 # TaxonDBBuilder
 
-NCBIから任意の分類群・任意のマーカーの配列を取得し、DB用のFASTAを生成するツールです。分類群は **taxid / 学名** のどちらでも指定でき、マーカーは **TOMLで定義したフレーズ群** をprefix指定で呼び出せます。
+NCBI と BOLD Data Portal から任意の分類群・任意のマーカーの配列を取得し、DB用のFASTAを生成するツールです。分類群は **taxid / 学名** のどちらでも指定でき、マーカーは **TOMLで定義したフレーズ群** をprefix指定で呼び出せます。
 
 もとにあったMiFish プライマー用のDB作成リポジトリから、「汎用DB FASTA生成」へ方針変更しています。解析 (抽出・フィルタリング・分類付与など)は対象外で、**DB用FASTAの生成が目的**です。
 
@@ -60,14 +60,40 @@ uv pip install -r requirements.txt
 # 2) 設定（api_key / email を入力）
 # configs/db.toml を編集
 
-# 3) 実行（GenBankキャッシュ保存）
-python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb
+# 3) 実行（NCBI / GenBank キャッシュ保存）
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --source ncbi --dump-gb Results/gb
 ```
 
 再実行時にキャッシュを優先して使う場合:
 ```bash
-python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --dump-gb Results/gb --resume
+python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --source ncbi --dump-gb Results/gb --resume
 ```
+
+BOLD のみ取得する場合:
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m coi --source bold
+```
+
+NCBI と BOLD を統合する場合:
+```bash
+python3 taxondbbuilder.py build -c configs/db.toml -t "Salmo salar" -m coi --source both
+```
+
+## Source の選択
+
+`build` では次の source を選べます。
+
+- `--source ncbi`
+  - 従来通り NCBI / GenBank のみを使います。
+- `--source bold`
+  - BOLD Data Portal のみを使います。
+- `--source both`
+  - NCBI と BOLD の両方を取得し、BOLD `insdcacs` と NCBI accession の strict match のみで BOLD record を抑制します。
+
+補足:
+- `--dump-gb`, `--from-gb`, `--resume` は NCBI 側の GenBank キャッシュです。
+- `--source bold` ではこれらのオプションは使えません。
+- `--source both` では NCBI 側にのみ適用されます。
 
 ## 設定ファイル (TOML)
 `configs/db.toml` を編集して使います。
@@ -83,13 +109,21 @@ retmode = "text"
 per_query = 100
 use_history = true
 
+[bold]
+# Optional. If omitted, built-in defaults are used.
+# base_url = "https://portal.boldsystems.org/api"
+# timeout_sec = 60
+# retries = 3
+# backoff_sec = 1.5
+# user_agent = "TaxonDBBuilder/0.1"
+
 [output]
 default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
 
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
 verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 [taxon]
 noexp = false
@@ -103,6 +137,8 @@ file = "configs/markers_mitogenome.toml"
 # aliases = ["mygene", "mg"]
 # phrases = ["MyGene"]
 # region_patterns = ["MyGene"]
+# [markers."mygene".bold]
+# marker_codes = ["MYGENE"]
 
 [filters]
 # フィルタ無しがデフォルト。必要な場合だけ指定してください。
@@ -134,9 +170,11 @@ file = "configs/markers_mitogenome.toml"
 - `phrases`: **検索用**の簡易フレーズ。自動的に `"..."[All Fields]` として扱われます。
 - `terms`: **検索用**の生クエリ。`rrnS[Gene]` のようにフィールド指定をそのまま書けます。
 - `region_patterns`: **GenBank feature抽出用**の正規表現。`gene/product/note/standard_name` などの注釈に対してマッチします。
+- `[markers.<id>.bold].marker_codes`: **BOLD record 判定用**の marker code 一覧です。
 
 `region_patterns` 未指定の場合は、`phrases/terms` から**リテラル**として自動生成します。
 抽出はGenBankのfeature注釈に依存するため、目的の領域が出ない場合は `region_patterns` と `feature_types/feature_fields` を調整してください。
+一方 BOLD では taxon で広く取得し、`marker_code` を client-side で絞り込みます。
 
 ### markers.file について
 - `[markers].file` でマーカー定義を外部TOMLへ分離できます。
@@ -156,21 +194,25 @@ file = "configs/markers_mitogenome.toml"
 - まずは `false` のまま使い、検索対象を taxid 直下に絞りたい場合に `true` を検討してください。
 
 ## 設定ガイド
-このツールの設定は「検索 (NCBIクエリ)」と「抽出 (GenBank feature注釈)」を分けて考えると整理しやすいです。
+このツールの設定は「検索 / 取得」と「抽出 / 出力」を分けて考えると整理しやすいです。
 
 ### 設定ファイルの役割
-- `db.toml` は「**共通設定** (NCBI / 出力 / filters / markers.file)」を持ちます。
+- `db.toml` は「**共通設定** (NCBI / BOLD / 出力 / filters / markers.file)」を持ちます。
 - `markers` 外部ファイルは「**マーカー定義**」だけを持ちます ([markers] テーブル)。
 - これにより、用途ごとにマーカー定義を差し替える運用ができます。
 - `[markers]` セクションは必須で、`file` 指定とインライン定義を併用できます。
 
 ### 1. 最小構成 (必須)
-- `ncbi` セクション: `email` / `api_key` / `db` / `rettype` など
+- `source=ncbi` / `source=both` を使う場合:
+  - `ncbi` セクション: `email` / `api_key` / `db` / `rettype` など
+- `source=bold` のみを使う場合:
+  - `ncbi` セクションは省略可能
+  - 必要なら `bold` セクションで timeout / retry などを調整
 - `[markers]` セクション: `file` もしくはインライン定義
 - `output`: FASTAヘッダーの形式
 
 ### 2. マーカー定義の考え方
-マーカー定義は以下の3要素で構成されます。
+マーカー定義は以下の 4 要素で構成されます。
 
 - **検索用 (phrases / terms)**
   NCBIの検索に使う語句。
@@ -184,6 +226,10 @@ file = "configs/markers_mitogenome.toml"
   `feature_types` で対象のfeature型を限定できます (rRNA/gene/CDS など)。
   `feature_fields` で参照する注釈項目を制御します。
 
+- **BOLD 用判定 (bold.marker_codes)**
+  BOLD の `marker_code` と照合する候補です。
+  未指定時は `aliases` / `phrases` / marker key にフォールバックします。
+
 ### 3. よくあるパターン
 **rRNA系 (12S/16S など)**
 ```toml
@@ -193,6 +239,9 @@ phrases = ["12S", "rrnS", "small subunit ribosomal RNA"]
 region_patterns = ["12S", "rrnS", "small subunit ribosomal RNA"]
 feature_types = ["rRNA", "gene"]
 feature_fields = ["gene", "product", "note", "standard_name"]
+
+[markers."12s".bold]
+marker_codes = ["12S"]
 ```
 
 **タンパク質コーディング (COI/ND1 など)**
@@ -203,6 +252,9 @@ phrases = ["COI", "CO1", "COX1", "cytochrome c oxidase subunit I"]
 region_patterns = ["COI", "CO1", "COX1", "cytochrome c oxidase subunit I"]
 feature_types = ["CDS", "gene"]
 feature_fields = ["gene", "product", "note", "standard_name"]
+
+[markers."coi".bold]
+marker_codes = ["COI-5P", "COI-3P", "COI"]
 ```
 
 ### 4. FASTAヘッダーの指定
@@ -217,7 +269,7 @@ feature_fields = ["gene", "product", "note", "standard_name"]
 ```toml
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 [markers."12s"]
 header_format = "mifish_pipeline"
@@ -241,6 +293,15 @@ header_format = "mifish_pipeline"
 | `{loc}` | GenBank feature | `start-end` 形式の位置 |
 | `{strand}` | GenBank feature | strand (`1`, `-1`, もしくは `0`) |
 | `{dup}` | 内部生成 | 重複配列のタグ (`dupN` or 空文字) |
+| `{source}` | 内部生成 | `ncbi` または `bold` |
+| `{source_id}` | 内部生成 | source 側の record ID |
+
+### 補助出力
+- `*.fasta.acc_organism.csv`
+  - FASTA に出たレコードと accession / organism / source 情報の対応表です。
+- `*.fasta.source_merge.csv`
+  - source 統合時の keep / skip を記録します。
+  - `skip_reason=linked_by_insdcacs` は BOLD `insdcacs` が NCBI accession と strict match したため抑制されたことを意味します。
 
 ## 逆引き (よくある目的別)
 ### Q. 目的のマーカー情報が登録されていない
@@ -396,7 +457,7 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 - 直接テンプレート文字列を `header_format` に書くことも可能です。
 
 使用できるプレースホルダ:
-`{acc}`, `{acc_id}`, `{organism}`, `{organism_raw}`, `{marker}`, `{marker_raw}`, `{label}`, `{label_raw}`, `{type}`, `{type_raw}`, `{start}`, `{end}`, `{loc}`, `{strand}`, `{dup}`
+`{acc}`, `{acc_id}`, `{db}`, `{organism}`, `{organism_raw}`, `{marker}`, `{marker_raw}`, `{label}`, `{label_raw}`, `{type}`, `{type_raw}`, `{start}`, `{end}`, `{loc}`, `{strand}`, `{dup}`
 
 ## 出力
 - 出力先: `Results/db/YYYYMMDD/`

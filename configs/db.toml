@@ -11,6 +11,14 @@ use_history = true
 # delay_sec overrides default rate-limit delay.
 # delay_sec = 0.34
 
+[bold]
+# Optional. Used by --source bold / --source both.
+# base_url = "https://portal.boldsystems.org/api"
+# timeout_sec = 60
+# retries = 3
+# backoff_sec = 1.5
+# user_agent = "TaxonDBBuilder/0.1"
+
 # Output header format
 [output]
 default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}"
@@ -18,7 +26,7 @@ default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{stra
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
 verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 # Taxon options
 [taxon]
@@ -55,5 +63,5 @@ file = "configs/markers_mitogenome.toml"
 # sequence_length_min = 120
 # sequence_length_max = 300
 primer_file = "configs/primers.toml"
-# primer_set = "mifish_12s"
-# primer_set = ["mifish_12s", "mifish_ev2"]
+# primer_set = "mifish_u"
+# primer_set = ["mifish_u", "mifish_ev2"]
