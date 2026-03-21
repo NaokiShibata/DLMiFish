@@ -433,6 +433,7 @@ def extract_ncbi_records_from_genbank_chunk(
                 header_values = {
                     "acc": acc,
                     "acc_id": acc_id,
+                    "db": "gb",
                     "organism": organism_safe,
                     "organism_raw": str(organism),
                     "marker": marker_safe,
@@ -511,8 +512,6 @@ def build_bold_canonical_record(
     header_key = marker_cfg.get("header_format")
     if not header_key:
         header_format = DEFAULT_BOLD_HEADER_FORMAT
-    elif header_key == "mifish_pipeline":
-        header_format = DEFAULT_BOLD_HEADER_FORMAT
     else:
         header_format = resolve_header_format(marker_cfg, output_cfg)
     processid = normalized_row.get("processid")
@@ -529,6 +528,7 @@ def build_bold_canonical_record(
     header_values = {
         "acc": str(accession or ""),
         "acc_id": acc_id,
+        "db": "bold",
         "organism": organism_safe,
         "organism_raw": str(taxon_name),
         "marker": marker_safe,

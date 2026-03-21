@@ -123,7 +123,7 @@ default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{stra
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
 verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 [taxon]
 noexp = false
@@ -269,7 +269,7 @@ marker_codes = ["COI-5P", "COI-3P", "COI"]
 ```toml
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 [markers."12s"]
 header_format = "mifish_pipeline"
@@ -457,7 +457,7 @@ python3 taxondbbuilder.py build -c configs/db.toml -t 117570 -m 12s --workers 2
 - 直接テンプレート文字列を `header_format` に書くことも可能です。
 
 使用できるプレースホルダ:
-`{acc}`, `{acc_id}`, `{organism}`, `{organism_raw}`, `{marker}`, `{marker_raw}`, `{label}`, `{label_raw}`, `{type}`, `{type_raw}`, `{start}`, `{end}`, `{loc}`, `{strand}`, `{dup}`
+`{acc}`, `{acc_id}`, `{db}`, `{organism}`, `{organism_raw}`, `{marker}`, `{marker_raw}`, `{label}`, `{label_raw}`, `{type}`, `{type_raw}`, `{start}`, `{end}`, `{loc}`, `{strand}`, `{dup}`
 
 ## 出力
 - 出力先: `Results/db/YYYYMMDD/`
