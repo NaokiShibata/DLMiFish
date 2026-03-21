@@ -51,6 +51,44 @@ def build_taxon_query(scientific_name: str) -> str:
     return f"tax:{scientific_name}"
 
 
+def _parse_json_payload(text: str) -> Any:
+    stripped = text.lstrip("\ufeff").strip()
+    if not stripped:
+        raise json.JSONDecodeError("Empty response", text, 0)
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    values: List[Any] = []
+    idx = 0
+    length = len(stripped)
+    while idx < length:
+        while idx < length and stripped[idx].isspace():
+            idx += 1
+        if idx >= length:
+            break
+        value, next_idx = decoder.raw_decode(stripped, idx)
+        values.append(value)
+        idx = next_idx
+
+    if values:
+        return values if len(values) > 1 else values[0]
+
+    line_values: List[Any] = []
+    for line in stripped.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line_values.append(json.loads(line))
+    if line_values:
+        return line_values if len(line_values) > 1 else line_values[0]
+
+    raise json.JSONDecodeError("Unable to parse JSON payload", text, 0)
+
+
 def _request_json(url: str, runtime_cfg: Dict[str, Any]) -> Any:
     retries = int(runtime_cfg["retries"])
     timeout_sec = float(runtime_cfg["timeout_sec"])
@@ -71,7 +109,7 @@ def _request_json(url: str, runtime_cfg: Dict[str, Any]) -> Any:
                     body = gzip.decompress(body)
                 charset = response.headers.get_content_charset() or "utf-8"
                 text = body.decode(charset, errors="replace")
-                return json.loads(text)
+                return _parse_json_payload(text)
         except HTTPError as exc:
             if attempt >= retries:
                 raise BoldApiError(f"BOLD HTTP error {exc.code}: {exc.reason}") from exc
@@ -317,6 +355,7 @@ def normalize_bold_row(
             raw_row,
             [
                 "nucleotides",
+                "nuc",
                 "sequence",
                 "nucleotide",
                 "nucleotidesequence",
