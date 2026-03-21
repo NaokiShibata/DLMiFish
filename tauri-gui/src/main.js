@@ -51,6 +51,7 @@ const els = {
   primerSetInput: document.querySelector("#primer-set"),
   postLengthMinInput: document.querySelector("#post-length-min"),
   postLengthMaxInput: document.querySelector("#post-length-max"),
+  sourceInput: document.querySelector("#source"),
   ncbiDbInput: document.querySelector("#ncbi-db"),
   ncbiRettypeInput: document.querySelector("#ncbi-rettype"),
   ncbiRetmodeInput: document.querySelector("#ncbi-retmode"),
@@ -59,6 +60,8 @@ const els = {
   ncbiDelaySecInput: document.querySelector("#ncbi-delay-sec"),
   outputDefaultHeaderFormatInput: document.querySelector("#output-default-header-format"),
   outputMifishHeaderFormatInput: document.querySelector("#output-mifish-header-format"),
+  resumeInput: document.querySelector("#resume"),
+  duplicateReportStep: document.querySelector('.post-step[value="duplicate_report"]'),
   loadDbTomlBtn: document.querySelector("#load-db-toml"),
   loadedDbTomlPath: document.querySelector("#loaded-db-toml")
 };
@@ -115,6 +118,45 @@ function parseTaxidTokens(raw) {
     .split(/[\s,;]+/)
     .map((v) => v.trim())
     .filter(Boolean);
+}
+
+function currentBuildSource() {
+  const raw = `${els.sourceInput?.value || ""}`.trim().toLowerCase();
+  if (raw === "bold" || raw === "both") return raw;
+  return "ncbi";
+}
+
+function sourceUsesNcbi() {
+  return currentBuildSource() !== "bold";
+}
+
+function syncSourceMode({ resetDuplicateForBoth = false } = {}) {
+  const source = currentBuildSource();
+  const usesNcbi = sourceUsesNcbi();
+
+  if (els.emailInput) {
+    els.emailInput.required = usesNcbi;
+    els.emailInput.placeholder = usesNcbi
+      ? "your.email@example.com"
+      : "optional for BOLD-only";
+  }
+
+  if (els.flowEmail) {
+    els.flowEmail.textContent = usesNcbi
+      ? "4. Set NCBI email"
+      : "4. NCBI email is optional for BOLD-only";
+  }
+
+  if (els.resumeInput) {
+    if (!usesNcbi) {
+      els.resumeInput.checked = false;
+    }
+    els.resumeInput.disabled = !usesNcbi;
+  }
+
+  if (resetDuplicateForBoth && source === "both" && els.duplicateReportStep) {
+    els.duplicateReportStep.checked = false;
+  }
 }
 
 function syncTaxidsHidden() {
@@ -300,6 +342,7 @@ function setPostPrepStepSelection(steps) {
 }
 
 function applyImportedDbToml(imported) {
+  els.sourceInput.value = imported.source || "ncbi";
   document.querySelector("#email").value = imported.email || "";
 
   const apiKey = imported.apiKey || "";
@@ -332,7 +375,8 @@ function applyImportedDbToml(imported) {
   const outputOptions = imported.outputOptions || {};
   els.outputDefaultHeaderFormatInput.value =
     outputOptions.defaultHeaderFormat || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
-  els.outputMifishHeaderFormatInput.value = outputOptions.mifishHeaderFormat || "gb|{acc_id}|{organism}";
+  els.outputMifishHeaderFormatInput.value = outputOptions.mifishHeaderFormat || "{db}|{acc_id}|{organism}";
+  syncSourceMode();
 }
 
 function isReadyToRun() {
@@ -340,7 +384,7 @@ function isReadyToRun() {
     state.taxids.length > 0 &&
     state.markers.length > 0 &&
     els.outputRootInput.value.trim().length > 0 &&
-    els.emailInput.value.trim().length > 0
+    (!sourceUsesNcbi() || els.emailInput.value.trim().length > 0)
   );
 }
 
@@ -396,6 +440,7 @@ function collectRequest() {
   return {
     taxids: [...state.taxids],
     markers: [...state.markers],
+    source: currentBuildSource(),
     outputPrefix: document.querySelector("#output-prefix").value.trim() || "MiFish",
     outputRoot: document.querySelector("#output-root").value.trim(),
     email: document.querySelector("#email").value.trim(),
@@ -427,7 +472,7 @@ function collectRequest() {
     outputOptions: {
       defaultHeaderFormat:
         els.outputDefaultHeaderFormatInput.value.trim() || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}",
-      mifishHeaderFormat: els.outputMifishHeaderFormatInput.value.trim() || "gb|{acc_id}|{organism}"
+      mifishHeaderFormat: els.outputMifishHeaderFormatInput.value.trim() || "{db}|{acc_id}|{organism}"
     },
     workers: Number.parseInt(document.querySelector("#speed").value, 10),
     resume: document.querySelector("#resume").checked
@@ -454,6 +499,9 @@ function renderMetrics(metrics) {
   const items = [];
   const queryCountByTaxid = metrics?.queryCountByTaxid || {};
   const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
+  const boldSpecimenCountByTaxon = metrics?.boldSpecimenCountByTaxon || {};
+  const boldDownloadedByTaxon = metrics?.boldDownloadedByTaxon || {};
+  const boldMatchedByTaxon = metrics?.boldMatchedByTaxon || {};
   const allTaxids = new Set([...Object.keys(queryCountByTaxid), ...Object.keys(fetchCountByTaxid)]);
   for (const taxid of Array.from(allTaxids).sort()) {
     if (queryCountByTaxid[taxid] != null) {
@@ -468,6 +516,23 @@ function renderMetrics(metrics) {
       } else {
         items.push(`fetch progress taxid=${taxid}: ${fetched}`);
       }
+    }
+  }
+  const allBoldTaxa = new Set([
+    ...Object.keys(boldSpecimenCountByTaxon),
+    ...Object.keys(boldDownloadedByTaxon),
+    ...Object.keys(boldMatchedByTaxon)
+  ]);
+  for (const taxon of Array.from(allBoldTaxa).sort()) {
+    const specimens = boldSpecimenCountByTaxon[taxon];
+    const downloaded = boldDownloadedByTaxon[taxon];
+    const matched = boldMatchedByTaxon[taxon];
+    const parts = [];
+    if (specimens != null) parts.push(`specimens=${specimens}`);
+    if (downloaded != null) parts.push(`downloaded=${downloaded}`);
+    if (matched != null) parts.push(`matched=${matched}`);
+    if (parts.length) {
+      items.push(`bold taxon=${taxon}: ${parts.join(" ")}`);
     }
   }
   if (metrics?.matchedRecords != null) items.push(`matched records: ${metrics.matchedRecords}`);
@@ -491,10 +556,13 @@ function renderMetrics(metrics) {
 
 function renderProgressDetail(phase, percent, metrics) {
   const safePercent = typeof percent === "number" ? Math.max(0, Math.min(percent, 100)) : null;
-  let detail = safePercent != null ? `${safePercent.toFixed(1)}%` : "-";
+  const parts = [];
 
   const queryCountByTaxid = metrics?.queryCountByTaxid || {};
   const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
+  const boldSpecimenCountByTaxon = metrics?.boldSpecimenCountByTaxon || {};
+  const boldDownloadedByTaxon = metrics?.boldDownloadedByTaxon || {};
+  const boldMatchedByTaxon = metrics?.boldMatchedByTaxon || {};
   const total = Object.values(queryCountByTaxid).reduce((acc, v) => acc + (Number(v) || 0), 0);
   if (total > 0) {
     const fetched = Object.entries(fetchCountByTaxid).reduce((acc, [taxid, raw]) => {
@@ -503,13 +571,42 @@ function renderProgressDetail(phase, percent, metrics) {
       return acc + Math.min(done, max);
     }, 0);
     const fetchRatio = (Math.min(fetched, total) / total) * 100;
-    detail = `fetch ${Math.min(fetched, total)}/${total} (${fetchRatio.toFixed(1)}%)`;
-    if (phase && phase !== "Fetch/Parse" && safePercent != null) {
-      detail = `${detail} | total ${safePercent.toFixed(1)}%`;
-    }
+    parts.push(`fetch ${Math.min(fetched, total)}/${total} (${fetchRatio.toFixed(1)}%)`);
   }
 
-  els.progressDetail.textContent = detail;
+  const boldDownloadedTotal = Object.values(boldDownloadedByTaxon).reduce(
+    (acc, v) => acc + (Number(v) || 0),
+    0
+  );
+  const boldMatchedTotal = Object.values(boldMatchedByTaxon).reduce(
+    (acc, v) => acc + (Number(v) || 0),
+    0
+  );
+  const boldSpecimenTotal = Object.values(boldSpecimenCountByTaxon).reduce(
+    (acc, v) => acc + (Number(v) || 0),
+    0
+  );
+  if (boldDownloadedTotal > 0 || boldSpecimenTotal > 0) {
+    const boldTaxonCount = new Set([
+      ...Object.keys(boldSpecimenCountByTaxon),
+      ...Object.keys(boldDownloadedByTaxon),
+      ...Object.keys(boldMatchedByTaxon)
+    ]).size;
+    let boldDetail = `bold matched ${boldMatchedTotal}/${boldDownloadedTotal || 0}`;
+    if (boldSpecimenTotal > 0) {
+      boldDetail += ` specimens ${boldSpecimenTotal}`;
+    }
+    if (boldTaxonCount > 0) {
+      boldDetail += ` taxa ${boldTaxonCount}`;
+    }
+    parts.push(boldDetail);
+  }
+
+  if (safePercent != null && (!phase || phase !== "Fetch/Parse")) {
+    parts.push(`total ${safePercent.toFixed(1)}%`);
+  }
+
+  els.progressDetail.textContent = parts.length ? parts.join(" | ") : safePercent != null ? `${safePercent.toFixed(1)}%` : "-";
 }
 
 function renderResultFiles(files) {
@@ -582,6 +679,10 @@ async function loadSavedConfig() {
     } else if (!state.markers.length) {
       addMarkers(document.querySelector("#marker").value);
     }
+    if (saved.source) {
+      els.sourceInput.value = saved.source;
+      syncSourceMode();
+    }
     if (saved.workers) document.querySelector("#speed").value = `${saved.workers}`;
     if (saved.ncbiDb) els.ncbiDbInput.value = saved.ncbiDb;
     if (saved.ncbiRettype) els.ncbiRettypeInput.value = saved.ncbiRettype;
@@ -606,7 +707,7 @@ async function runJob() {
   if (!req.taxids.length) throw new Error("please input at least one taxid");
   if (!req.markers.length) throw new Error("please add at least one marker");
   if (!req.outputRoot) throw new Error("output directory is required");
-  if (!req.email) throw new Error("email is required");
+  if (sourceUsesNcbi() && !req.email) throw new Error("email is required for ncbi/both");
 
   await setupEventListener();
   resetMonitor();
@@ -635,6 +736,7 @@ function resetForm() {
   document.querySelector("#primer-file").value = "";
   document.querySelector("#primer-set").value = "";
   document.querySelector("#post-enable").checked = false;
+  syncSourceMode();
   updateGuidanceState();
 }
 
@@ -740,6 +842,10 @@ els.clearMarkers.addEventListener("click", () => {
 
 els.outputRootInput.addEventListener("input", updateGuidanceState);
 els.emailInput.addEventListener("input", updateGuidanceState);
+els.sourceInput.addEventListener("change", () => {
+  syncSourceMode({ resetDuplicateForBoth: true });
+  updateGuidanceState();
+});
 els.postEnableInput.addEventListener("change", updateGuidanceState);
 els.primerFileInput.addEventListener("input", updateGuidanceState);
 els.primerSetInput.addEventListener("input", updateGuidanceState);
@@ -766,5 +872,6 @@ els.tabResults.addEventListener("click", () => switchView("results"));
 addTaxids(els.taxidsHidden.value);
 renderTaxids();
 syncTaxidsHidden();
+syncSourceMode();
 loadSavedConfig();
 updateGuidanceState();

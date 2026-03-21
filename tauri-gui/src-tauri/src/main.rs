@@ -32,9 +32,10 @@ const DEFAULT_NCBI_DB: &str = "nucleotide";
 const DEFAULT_NCBI_RETTYPE: &str = "gb";
 const DEFAULT_NCBI_RETMODE: &str = "text";
 const DEFAULT_NCBI_PER_QUERY: u32 = 100;
+const DEFAULT_BUILD_SOURCE: &str = "ncbi";
 const DEFAULT_OUTPUT_HEADER_FORMAT: &str =
     "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
-const DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT: &str = "gb|{acc_id}|{organism}";
+const DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT: &str = "{db}|{acc_id}|{organism}";
 
 static MARKERS_TEMPLATE: &str = include_str!("../../resources/templates/markers_mitogenome.toml");
 static PRIMERS_TEMPLATE: &str = include_str!("../../resources/templates/primers.toml");
@@ -44,6 +45,16 @@ static RE_QUERY_COUNT: Lazy<Regex> =
 static RE_FETCH_PROGRESS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^# fetch progress taxid=([^:]+):\s*(\d+)\s*/\s*(\d+)$")
         .expect("fetch progress regex")
+});
+static RE_BOLD_PROGRESS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^# bold progress: taxon=(.+?) phase=([a-z_]+)(?:\s+(.*))?$")
+        .expect("bold progress regex")
+});
+static RE_BOLD_QUERY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^# bold query: taxon=(.+?) normalized=.* specimens=(\d+)(?: .*?)? downloaded=(\d+) matched=(\d+)$",
+    )
+    .expect("bold query regex")
 });
 static RE_TOTAL_RECORDS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^# total records:\s*(\d+)").expect("total records regex"));
@@ -63,6 +74,7 @@ static RE_DUP_CROSS: Lazy<Regex> =
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 struct GuiConfig {
+    source: String,
     email: String,
     api_key: String,
     save_api_key: bool,
@@ -83,6 +95,7 @@ struct GuiConfig {
 impl Default for GuiConfig {
     fn default() -> Self {
         Self {
+            source: DEFAULT_BUILD_SOURCE.to_string(),
             email: String::new(),
             api_key: String::new(),
             save_api_key: false,
@@ -185,6 +198,8 @@ impl Default for OutputOptionsInput {
 struct RunRequest {
     taxids: Vec<String>,
     markers: Vec<String>,
+    #[serde(default = "default_build_source")]
+    source: String,
     output_prefix: String,
     output_root: String,
     email: String,
@@ -204,6 +219,7 @@ struct RunRequest {
 #[serde(rename_all = "camelCase")]
 struct ImportedDbTomlConfig {
     source_path: String,
+    source: String,
     email: String,
     api_key: String,
     ncbi_options: NcbiOptionsInput,
@@ -235,6 +251,9 @@ struct StartRunResponse {
 struct RunMetrics {
     query_count_by_taxid: BTreeMap<String, u64>,
     fetch_count_by_taxid: BTreeMap<String, u64>,
+    bold_specimen_count_by_taxon: BTreeMap<String, u64>,
+    bold_downloaded_by_taxon: BTreeMap<String, u64>,
+    bold_matched_by_taxon: BTreeMap<String, u64>,
     matched_records: Option<u64>,
     kept_records_before_post_prep: Option<u64>,
     primer_trim_removed: Option<u64>,
@@ -272,6 +291,7 @@ struct AppState {
 struct ProgressParser {
     taxid_total: usize,
     query_seen: HashSet<String>,
+    bold_progress_by_taxon: BTreeMap<String, f64>,
     total_records: Option<u64>,
     matched_records: Option<u64>,
     post_steps_total: usize,
@@ -286,6 +306,7 @@ impl ProgressParser {
         Self {
             taxid_total,
             query_seen: HashSet::new(),
+            bold_progress_by_taxon: BTreeMap::new(),
             total_records: None,
             matched_records: None,
             post_steps_total,
@@ -339,6 +360,93 @@ impl ProgressParser {
             }
         }
 
+        if let Some(caps) = RE_BOLD_PROGRESS.captures(line) {
+            let taxon = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let phase = caps.get(2).map(|m| m.as_str()).unwrap_or("").trim();
+            let detail = caps.get(3).map(|m| m.as_str()).unwrap_or("").trim();
+            if !taxon.is_empty() {
+                let stage_ratio = match phase {
+                    "preprocess" => 0.15,
+                    "summary" => 0.30,
+                    "query" => 0.45,
+                    "download" => 0.75,
+                    "filter" => 1.00,
+                    _ => 0.0,
+                };
+                self.bold_progress_by_taxon
+                    .insert(taxon.to_string(), stage_ratio);
+                self.phase = match phase {
+                    "preprocess" => "BOLD Preprocess".to_string(),
+                    "summary" => "BOLD Summary".to_string(),
+                    "query" => "BOLD Query".to_string(),
+                    "download" => "BOLD Download".to_string(),
+                    "filter" => "BOLD Filter".to_string(),
+                    _ => "BOLD".to_string(),
+                };
+                if let Some(specimens_raw) = detail
+                    .split_whitespace()
+                    .find_map(|token| token.strip_prefix("specimens="))
+                {
+                    if let Ok(specimens) = specimens_raw.parse::<u64>() {
+                        self.metrics
+                            .bold_specimen_count_by_taxon
+                            .insert(taxon.to_string(), specimens);
+                    }
+                }
+                if let Some(downloaded_raw) = detail
+                    .split_whitespace()
+                    .find_map(|token| token.strip_prefix("downloaded="))
+                {
+                    if let Ok(downloaded) = downloaded_raw.parse::<u64>() {
+                        self.metrics
+                            .bold_downloaded_by_taxon
+                            .insert(taxon.to_string(), downloaded);
+                    }
+                }
+                if let Some(matched_raw) = detail
+                    .split_whitespace()
+                    .find_map(|token| token.strip_prefix("matched="))
+                {
+                    if let Ok(matched) = matched_raw.parse::<u64>() {
+                        self.metrics
+                            .bold_matched_by_taxon
+                            .insert(taxon.to_string(), matched);
+                    }
+                }
+                changed = true;
+            }
+        }
+
+        if let Some(caps) = RE_BOLD_QUERY.captures(line) {
+            let taxon = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim();
+            let specimens = caps
+                .get(2)
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            let downloaded = caps
+                .get(3)
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            let matched = caps
+                .get(4)
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+                .unwrap_or(0);
+            if !taxon.is_empty() {
+                self.metrics
+                    .bold_specimen_count_by_taxon
+                    .insert(taxon.to_string(), specimens);
+                self.metrics
+                    .bold_downloaded_by_taxon
+                    .insert(taxon.to_string(), downloaded);
+                self.metrics
+                    .bold_matched_by_taxon
+                    .insert(taxon.to_string(), matched);
+                self.bold_progress_by_taxon.insert(taxon.to_string(), 1.0);
+                self.phase = "BOLD Filter".to_string();
+                changed = true;
+            }
+        }
+
         if let Some(caps) = RE_TOTAL_RECORDS.captures(line) {
             self.total_records = caps.get(1).and_then(|m| m.as_str().parse::<u64>().ok());
             changed = true;
@@ -354,7 +462,7 @@ impl ProgressParser {
         if let Some(caps) = RE_KEPT_BEFORE_POST.captures(line) {
             self.metrics.kept_records_before_post_prep =
                 caps.get(1).and_then(|m| m.as_str().parse::<u64>().ok());
-            self.phase = "Post-pPrep".to_string();
+            self.phase = "Post-Prep".to_string();
             self.percent = self.percent.max(80.0);
             changed = true;
         }
@@ -427,6 +535,15 @@ impl ProgressParser {
                 }
             }
 
+            if !self.bold_progress_by_taxon.is_empty() {
+                let bold_progress_sum: f64 = self.bold_progress_by_taxon.values().copied().sum();
+                let overall_ratio =
+                    (bold_progress_sum / self.taxid_total.max(1) as f64).clamp(0.0, 1.0);
+                self.percent = self
+                    .percent
+                    .max((10.0 + overall_ratio * 70.0).clamp(10.0, 80.0));
+            }
+
             if let (Some(total), Some(matched)) = (self.total_records, self.matched_records) {
                 if total > 0 {
                     self.phase = "Fetch/Parse".to_string();
@@ -436,7 +553,7 @@ impl ProgressParser {
             }
 
             if self.post_steps_total > 0 && !self.post_steps_seen.is_empty() {
-                self.phase = "Post-pPrep".to_string();
+                self.phase = "Post-Prep".to_string();
                 let ratio = (self.post_steps_seen.len() as f64 / self.post_steps_total as f64)
                     .clamp(0.0, 1.0);
                 self.percent = self.percent.max(80.0 + ratio * 15.0);
@@ -525,6 +642,22 @@ fn to_abs_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn default_build_source() -> String {
+    DEFAULT_BUILD_SOURCE.to_string()
+}
+
+fn normalize_build_source(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "bold" => "bold".to_string(),
+        "both" => "both".to_string(),
+        _ => "ncbi".to_string(),
+    }
+}
+
+fn source_uses_ncbi(source: &str) -> bool {
+    normalize_build_source(source) != "bold"
+}
+
 fn gui_config_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "HOME directory not found".to_string())?;
     Ok(home.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME))
@@ -609,6 +742,7 @@ fn run_post_prep_rust(
 
     let has_length_filter =
         req.post_prep.sequence_length_min.is_some() || req.post_prep.sequence_length_max.is_some();
+    let build_source = normalize_build_source(&req.source);
 
     let mut steps = req.post_prep.steps.clone();
     if steps.is_empty() {
@@ -618,7 +752,14 @@ fn run_post_prep_rust(
         if has_length_filter {
             steps.push("length_filter".to_string());
         }
-        steps.push("duplicate_report".to_string());
+        if build_source == "both" {
+            append_log_line(
+                log_path,
+                "# post_prep duplicate_acc_report: skipped (step disabled)",
+            )?;
+        } else {
+            steps.push("duplicate_report".to_string());
+        }
     }
 
     for step in steps {
@@ -844,24 +985,27 @@ fn write_job_config(req: &RunRequest, config_dir: &Path) -> Result<PathBuf, Stri
     } else {
         req.output_options.mifish_header_format.trim().to_string()
     };
+    let source = normalize_build_source(&req.source);
 
     let mut toml = String::new();
-    toml.push_str("[ncbi]\n");
-    toml.push_str(&format!("email = {}\n", toml_quote(req.email.trim())));
-    if !req.api_key.trim().is_empty() {
-        toml.push_str(&format!("api_key = {}\n", toml_quote(req.api_key.trim())));
-    }
-    toml.push_str(&format!("db = {}\n", toml_quote(&ncbi_db)));
-    toml.push_str(&format!("rettype = {}\n", toml_quote(&ncbi_rettype)));
-    toml.push_str(&format!("retmode = {}\n", toml_quote(&ncbi_retmode)));
-    toml.push_str(&format!("per_query = {}\n", ncbi_per_query));
-    toml.push_str(&format!("use_history = {}\n", req.ncbi_options.use_history));
-    if let Some(delay_sec) = req.ncbi_options.delay_sec {
-        if delay_sec > 0.0 {
-            toml.push_str(&format!("delay_sec = {}\n", delay_sec));
+    if source_uses_ncbi(&source) {
+        toml.push_str("[ncbi]\n");
+        toml.push_str(&format!("email = {}\n", toml_quote(req.email.trim())));
+        if !req.api_key.trim().is_empty() {
+            toml.push_str(&format!("api_key = {}\n", toml_quote(req.api_key.trim())));
         }
+        toml.push_str(&format!("db = {}\n", toml_quote(&ncbi_db)));
+        toml.push_str(&format!("rettype = {}\n", toml_quote(&ncbi_rettype)));
+        toml.push_str(&format!("retmode = {}\n", toml_quote(&ncbi_retmode)));
+        toml.push_str(&format!("per_query = {}\n", ncbi_per_query));
+        toml.push_str(&format!("use_history = {}\n", req.ncbi_options.use_history));
+        if let Some(delay_sec) = req.ncbi_options.delay_sec {
+            if delay_sec > 0.0 {
+                toml.push_str(&format!("delay_sec = {}\n", delay_sec));
+            }
+        }
+        toml.push('\n');
     }
-    toml.push('\n');
 
     toml.push_str("[output]\n");
     toml.push_str(&format!(
@@ -1146,6 +1290,15 @@ fn parse_db_toml_config(path: &Path) -> Result<ImportedDbTomlConfig, String> {
     let mut imported = ImportedDbTomlConfig {
         source_path: path.to_string_lossy().to_string(),
         ..ImportedDbTomlConfig::default()
+    };
+    let has_ncbi = value.get("ncbi").and_then(|v| v.as_table()).is_some();
+    let has_bold = value.get("bold").and_then(|v| v.as_table()).is_some();
+    imported.source = if has_ncbi && has_bold {
+        "both".to_string()
+    } else if !has_ncbi {
+        "bold".to_string()
+    } else {
+        "ncbi".to_string()
     };
 
     if let Some(ncbi) = value.get("ncbi").and_then(|v| v.as_table()) {
@@ -1471,8 +1624,9 @@ fn start_run(
     if req.output_root.trim().is_empty() {
         return Err("output_root is required".to_string());
     }
-    if req.email.trim().is_empty() {
-        return Err("email is required".to_string());
+    let build_source = normalize_build_source(&req.source);
+    if source_uses_ncbi(&build_source) && req.email.trim().is_empty() {
+        return Err("email is required for ncbi/both".to_string());
     }
 
     {
@@ -1486,6 +1640,7 @@ fn start_run(
     }
 
     let gui_config = GuiConfig {
+        source: build_source.clone(),
         email: req.email.clone(),
         api_key: req.api_key.clone(),
         save_api_key: req.save_api_key,
@@ -1555,7 +1710,8 @@ fn start_run(
     let gb_dir_for_thread = gb_dir.clone();
     let marker_for_thread = req.markers.clone();
     let taxids_for_thread = req.taxids.clone();
-    let resume_for_thread = req.resume;
+    let resume_for_thread = req.resume && source_uses_ncbi(&build_source);
+    let source_for_thread = build_source.clone();
     let taxid_total = req.taxids.len();
     let post_steps_total = if req.post_prep.enable {
         req.post_prep.steps.len().max(1)
@@ -1575,6 +1731,7 @@ fn start_run(
                 config_path: config_path_for_thread,
                 taxids: taxids_for_thread,
                 markers: marker_for_thread,
+                source: source_for_thread,
                 output_file: output_file_for_worker,
                 dump_gb_dir: gb_dir_for_thread,
                 resume: resume_for_thread,
@@ -1583,6 +1740,7 @@ fn start_run(
                 &build_params,
                 &log_path_for_worker,
                 cancelled_for_worker.as_ref(),
+                &child_arc,
             ));
         });
 

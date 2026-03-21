@@ -34,6 +34,9 @@ feature_types = ["rRNA", "gene"]
 feature_fields = ["gene", "product", "note", "standard_name"]
 header_format = "mifish_pipeline"
 
+[markers."12s".bold]
+marker_codes = ["12S"]
+
 [markers."16s"]
 aliases = ["16", "16s", "rrnl"]
 phrases = ["16S", "rrnL", "large subunit ribosomal RNA"]
@@ -49,6 +52,9 @@ region_patterns = ["COI", "CO1", "COX1", "cytochrome c oxidase subunit I"]
 feature_types = ["CDS", "gene"]
 feature_fields = ["gene", "product", "note", "standard_name"]
 header_format = "mifish_pipeline"
+
+[markers."coi".bold]
+marker_codes = ["COI-5P", "COI-3P", "COI"]
 
 [markers."coii"]
 aliases = ["coii", "cox2"]
