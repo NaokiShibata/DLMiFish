@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import csv
 import gzip
 import hashlib
+import io
 import json
 import re
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -17,10 +21,23 @@ DEFAULT_RETRIES = 3
 DEFAULT_BACKOFF_SEC = 1.5
 DEFAULT_USER_AGENT = "TaxonDBBuilder/0.1 (+https://github.com/NaokiShibata/TaxonDBBuilder)"
 MAX_DOCUMENT_COUNT = 1_000_000
+DEFAULT_DOWNLOAD_FORMAT = "tsv"
+DEFAULT_DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
 class BoldApiError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PreparedBoldQuery:
+    scientific_name: str
+    raw_query: str
+    normalized_query: str
+    specimen_count: Optional[int]
+    query_id: Optional[str]
+    runtime_cfg: Dict[str, Any]
+    download_format: str
 
 
 def get_bold_runtime_config(raw_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -30,6 +47,8 @@ def get_bold_runtime_config(raw_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]
     retries = int(cfg.get("retries", DEFAULT_RETRIES))
     backoff_sec = float(cfg.get("backoff_sec", DEFAULT_BACKOFF_SEC))
     user_agent = str(cfg.get("user_agent", DEFAULT_USER_AGENT)).strip() or DEFAULT_USER_AGENT
+    download_format = str(cfg.get("download_format", DEFAULT_DOWNLOAD_FORMAT)).strip().lower() or DEFAULT_DOWNLOAD_FORMAT
+    download_chunk_size = int(cfg.get("download_chunk_size", DEFAULT_DOWNLOAD_CHUNK_SIZE))
 
     if timeout_sec <= 0:
         raise BoldApiError("bold.timeout_sec must be > 0.")
@@ -37,6 +56,10 @@ def get_bold_runtime_config(raw_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]
         raise BoldApiError("bold.retries must be >= 0.")
     if backoff_sec < 0:
         raise BoldApiError("bold.backoff_sec must be >= 0.")
+    if download_format not in {"json", "tsv"}:
+        raise BoldApiError("bold.download_format must be 'json' or 'tsv'.")
+    if download_chunk_size <= 0:
+        raise BoldApiError("bold.download_chunk_size must be > 0.")
 
     return {
         "base_url": base_url,
@@ -44,11 +67,51 @@ def get_bold_runtime_config(raw_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]
         "retries": retries,
         "backoff_sec": backoff_sec,
         "user_agent": user_agent,
+        "download_format": download_format,
+        "download_chunk_size": download_chunk_size,
     }
 
 
 def build_taxon_query(scientific_name: str) -> str:
     return f"tax:{scientific_name}"
+
+
+def _parse_json_payload(text: str) -> Any:
+    stripped = text.lstrip("\ufeff").strip()
+    if not stripped:
+        raise json.JSONDecodeError("Empty response", text, 0)
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    values: List[Any] = []
+    idx = 0
+    length = len(stripped)
+    while idx < length:
+        while idx < length and stripped[idx].isspace():
+            idx += 1
+        if idx >= length:
+            break
+        value, next_idx = decoder.raw_decode(stripped, idx)
+        values.append(value)
+        idx = next_idx
+
+    if values:
+        return values if len(values) > 1 else values[0]
+
+    line_values: List[Any] = []
+    for line in stripped.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line_values.append(json.loads(line))
+    if line_values:
+        return line_values if len(line_values) > 1 else line_values[0]
+
+    raise json.JSONDecodeError("Unable to parse JSON payload", text, 0)
 
 
 def _request_json(url: str, runtime_cfg: Dict[str, Any]) -> Any:
@@ -71,7 +134,7 @@ def _request_json(url: str, runtime_cfg: Dict[str, Any]) -> Any:
                     body = gzip.decompress(body)
                 charset = response.headers.get_content_charset() or "utf-8"
                 text = body.decode(charset, errors="replace")
-                return json.loads(text)
+                return _parse_json_payload(text)
         except HTTPError as exc:
             if attempt >= retries:
                 raise BoldApiError(f"BOLD HTTP error {exc.code}: {exc.reason}") from exc
@@ -216,10 +279,155 @@ def submit_query(normalized_query: str, runtime_cfg: Dict[str, Any], extent: str
     return query_id, payload
 
 
+def prepare_bold_query(scientific_name: str, bold_cfg: Optional[Dict[str, Any]] = None) -> PreparedBoldQuery:
+    runtime_cfg = get_bold_runtime_config(bold_cfg)
+    raw_query = build_taxon_query(scientific_name)
+    normalized_query, _ = preprocess_query(raw_query, runtime_cfg)
+    specimen_count = fetch_specimen_count(normalized_query, runtime_cfg)
+    if specimen_count is not None and specimen_count > MAX_DOCUMENT_COUNT:
+        raise BoldApiError(
+            f"BOLD query exceeds maximum downloadable records ({specimen_count} > {MAX_DOCUMENT_COUNT})."
+        )
+    query_id = None
+    if specimen_count != 0:
+        query_id, _ = submit_query(normalized_query, runtime_cfg, extent="full")
+    return PreparedBoldQuery(
+        scientific_name=scientific_name,
+        raw_query=raw_query,
+        normalized_query=normalized_query,
+        specimen_count=specimen_count,
+        query_id=query_id,
+        runtime_cfg=runtime_cfg,
+        download_format=str(runtime_cfg.get("download_format") or DEFAULT_DOWNLOAD_FORMAT).strip().lower(),
+    )
+
+
 def download_documents(query_id: str, runtime_cfg: Dict[str, Any], fmt: str = "json") -> Any:
     encoded_query_id = quote(query_id, safe="")
     url = _build_url(runtime_cfg["base_url"], f"/documents/{encoded_query_id}/download", {"format": fmt})
     return _request_json(url, runtime_cfg)
+
+
+def download_documents_to_path(
+    query_id: str,
+    runtime_cfg: Dict[str, Any],
+    dest_path: Path,
+    fmt: Optional[str] = None,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    encoded_query_id = quote(query_id, safe="")
+    format_name = str(fmt or runtime_cfg.get("download_format") or DEFAULT_DOWNLOAD_FORMAT).strip().lower()
+    if format_name not in {"json", "tsv"}:
+        raise BoldApiError(f"Unsupported BOLD download format: {format_name}")
+    url = _build_url(runtime_cfg["base_url"], f"/documents/{encoded_query_id}/download", {"format": format_name})
+
+    retries = int(runtime_cfg["retries"])
+    timeout_sec = float(runtime_cfg["timeout_sec"])
+    backoff_sec = float(runtime_cfg["backoff_sec"])
+    chunk_size = int(runtime_cfg["download_chunk_size"])
+    headers = {
+        "Accept": "application/json" if format_name == "json" else "text/tab-separated-values",
+        "Accept-Encoding": "gzip",
+        "User-Agent": str(runtime_cfg["user_agent"]),
+    }
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for attempt in range(retries + 1):
+        part_path = dest_path.with_suffix(dest_path.suffix + ".part")
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=timeout_sec) as response:
+                content_length_header = response.headers.get("Content-Length")
+                try:
+                    content_length = int(content_length_header) if content_length_header else None
+                except ValueError:
+                    content_length = None
+                encoding = response.headers.get("Content-Encoding", "")
+                raw_stream = response
+                if "gzip" in encoding.lower():
+                    raw_stream = gzip.GzipFile(fileobj=response)
+
+                downloaded_bytes = 0
+                with part_path.open("wb") as out_f:
+                    while True:
+                        chunk = raw_stream.read(chunk_size)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded_bytes, content_length)
+                part_path.replace(dest_path)
+                return {
+                    "path": str(dest_path),
+                    "format": format_name,
+                    "downloaded_bytes": downloaded_bytes,
+                    "content_length": content_length,
+                }
+        except HTTPError as exc:
+            if attempt >= retries:
+                raise BoldApiError(f"BOLD HTTP error {exc.code}: {exc.reason}") from exc
+        except URLError as exc:
+            if attempt >= retries:
+                raise BoldApiError(f"BOLD network error: {exc.reason}") from exc
+        except OSError as exc:
+            if attempt >= retries:
+                raise BoldApiError(f"BOLD download error: {exc}") from exc
+        finally:
+            if part_path.exists():
+                part_path.unlink(missing_ok=True)
+
+        if backoff_sec > 0:
+            time.sleep(backoff_sec * (attempt + 1))
+
+    raise BoldApiError("BOLD document download failed after retries.")
+
+
+def iter_tsv_document_rows(path: Path) -> Iterable[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as in_f:
+        reader = csv.DictReader(in_f, delimiter="\t")
+        if reader.fieldnames:
+            reader.fieldnames = [
+                name.lstrip("\ufeff").strip() if isinstance(name, str) else name
+                for name in reader.fieldnames
+            ]
+        for row in reader:
+            if not row:
+                continue
+            cleaned: Dict[str, Any] = {}
+            has_value = False
+            for key, value in row.items():
+                key_text = str(key).strip() if key is not None else ""
+                if not key_text:
+                    continue
+                if isinstance(value, str):
+                    cleaned[key_text] = value
+                    if value.strip():
+                        has_value = True
+                else:
+                    cleaned[key_text] = value
+                    if value is not None:
+                        has_value = True
+            if has_value:
+                yield cleaned
+
+
+def iter_json_document_rows(path: Path) -> Iterable[Dict[str, Any]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    payload = _parse_json_payload(text)
+    for row in extract_document_rows(payload):
+        yield row
+
+
+def iter_document_rows_from_path(path: Path, fmt: str) -> Iterable[Dict[str, Any]]:
+    format_name = fmt.strip().lower()
+    if format_name == "tsv":
+        yield from iter_tsv_document_rows(path)
+        return
+    if format_name == "json":
+        yield from iter_json_document_rows(path)
+        return
+    raise BoldApiError(f"Unsupported BOLD row iteration format: {fmt}")
 
 
 def extract_document_rows(documents_payload: Any) -> List[Dict[str, Any]]:
@@ -317,6 +525,7 @@ def normalize_bold_row(
             raw_row,
             [
                 "nucleotides",
+                "nuc",
                 "sequence",
                 "nucleotide",
                 "nucleotidesequence",
@@ -365,28 +574,37 @@ def fetch_bold_records_for_taxon(
     marker_map: Dict[str, Dict[str, Any]],
     bold_cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    runtime_cfg = get_bold_runtime_config(bold_cfg)
-    raw_query = build_taxon_query(scientific_name)
-    normalized_query, preprocess_payload = preprocess_query(raw_query, runtime_cfg)
-    specimen_count = fetch_specimen_count(normalized_query, runtime_cfg)
-    if specimen_count is not None and specimen_count > MAX_DOCUMENT_COUNT:
-        raise BoldApiError(
-            f"BOLD query exceeds maximum downloadable records ({specimen_count} > {MAX_DOCUMENT_COUNT})."
-        )
-    if specimen_count == 0:
+    prepared = prepare_bold_query(scientific_name, bold_cfg)
+    if prepared.specimen_count == 0:
         return [], {
-            "raw_query": raw_query,
-            "normalized_query": normalized_query,
+            "raw_query": prepared.raw_query,
+            "normalized_query": prepared.normalized_query,
             "specimen_count": 0,
-            "preprocess_payload": preprocess_payload,
             "query_id": None,
             "downloaded_rows": 0,
             "matched_rows": 0,
         }
 
-    query_id, query_payload = submit_query(normalized_query, runtime_cfg, extent="full")
-    documents_payload = download_documents(query_id, runtime_cfg, fmt="json")
-    rows = extract_document_rows(documents_payload)
+    if not prepared.query_id:
+        raise BoldApiError("BOLD query preparation did not return a query_id.")
+
+    format_name = prepared.download_format
+    if format_name == "json":
+        documents_payload = download_documents(prepared.query_id, prepared.runtime_cfg, fmt="json")
+        rows = extract_document_rows(documents_payload)
+        download_meta: Dict[str, Any] = {"format": "json"}
+    else:
+        download_path = Path(
+            f"/tmp/taxondbbuilder_bold_{hashlib.sha1(prepared.query_id.encode('utf-8')).hexdigest()[:16]}.tsv"
+        )
+        download_meta = download_documents_to_path(
+            prepared.query_id,
+            prepared.runtime_cfg,
+            download_path,
+            fmt=format_name,
+        )
+        rows = list(iter_document_rows_from_path(download_path, format_name))
+        download_path.unlink(missing_ok=True)
 
     normalized_rows: List[Dict[str, Any]] = []
     for row in rows:
@@ -395,12 +613,12 @@ def fetch_bold_records_for_taxon(
             normalized_rows.append(normalized)
 
     stats = {
-        "raw_query": raw_query,
-        "normalized_query": normalized_query,
-        "specimen_count": specimen_count,
-        "preprocess_payload": preprocess_payload,
-        "query_payload": query_payload,
-        "query_id": query_id,
+        "raw_query": prepared.raw_query,
+        "normalized_query": prepared.normalized_query,
+        "specimen_count": prepared.specimen_count,
+        "query_id": prepared.query_id,
+        "download_format": format_name,
+        "download_meta": download_meta,
         "downloaded_rows": len(rows),
         "matched_rows": len(normalized_rows),
     }

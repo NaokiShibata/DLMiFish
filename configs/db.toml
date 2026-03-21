@@ -26,7 +26,7 @@ default_header_format = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{stra
 [output.header_formats]
 simple = "{acc_id}|{marker}|{loc}"
 verbose = "{acc_id}|{organism_raw}|{marker_raw}|{label_raw}|{type_raw}|{loc}|{strand}"
-mifish_pipeline = "gb|{acc_id}|{organism}"
+mifish_pipeline = "{db}|{acc_id}|{organism}"
 
 # Taxon options
 [taxon]
