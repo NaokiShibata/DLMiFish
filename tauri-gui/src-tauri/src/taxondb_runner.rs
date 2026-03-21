@@ -455,6 +455,23 @@ fn eutils_get_text(endpoint: &str, params: &[(&str, String)]) -> Result<String, 
     String::from_utf8(out.stdout).map_err(|e| format!("curl output decode failed: {e}"))
 }
 
+fn eutils_post_text(endpoint: &str, params: &[(&str, String)]) -> Result<String, String> {
+    let url = format!("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/{endpoint}");
+    let mut cmd = Command::new("curl");
+    cmd.arg("-fsSL").arg(url);
+    for (k, v) in params {
+        cmd.arg("--data-urlencode").arg(format!("{k}={v}"));
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to execute curl: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("curl failed: {stderr}"));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("curl output decode failed: {e}"))
+}
+
 fn resolve_taxid(taxon: &str) -> Result<String, String> {
     if taxon.chars().all(|c| c.is_ascii_digit()) {
         return Ok(taxon.to_string());
@@ -1078,7 +1095,9 @@ pub fn run_build(
                 if !api_key.is_empty() {
                     fetch_params.push(("api_key", api_key.clone()));
                 }
-                let text = eutils_get_text("efetch.fcgi", &fetch_params)?;
+                // efetch with many IDs can exceed URL length when sent as GET.
+                // Use POST to avoid 414 URI Too Long.
+                let text = eutils_post_text("efetch.fcgi", &fetch_params)?;
                 let _ = fs::write(&cache_path, &text);
                 text
             };
