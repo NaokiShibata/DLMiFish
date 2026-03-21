@@ -38,7 +38,14 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
-from taxondb_bold import BoldApiError, fetch_bold_records_for_taxon, parse_accession_tokens
+from taxondb_bold import (
+    BoldApiError,
+    download_documents_to_path,
+    iter_document_rows_from_path,
+    normalize_bold_row,
+    parse_accession_tokens,
+    prepare_bold_query,
+)
 
 try:
     import tomllib
@@ -179,6 +186,152 @@ def render_result_table(
     table.add_row("Output", str(out_path))
     table.add_row("Log", str(log_path))
     console.print(table)
+
+
+def format_byte_count(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KiB"
+    if num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f} MiB"
+    return f"{num_bytes / (1024 * 1024 * 1024):.1f} GiB"
+
+
+def build_bold_download_description(
+    scientific_name: str,
+    downloaded_bytes: int,
+    content_length: Optional[int],
+) -> str:
+    if content_length:
+        return (
+            f"BOLD {scientific_name}: download "
+            f"{format_byte_count(downloaded_bytes)}/{format_byte_count(content_length)}"
+        )
+    return f"BOLD {scientific_name}: download {format_byte_count(downloaded_bytes)}"
+
+
+def process_bold_taxon_to_spool(
+    resolved_taxon: ResolvedTaxon,
+    prepared_query: Any,
+    marker_keys: List[str],
+    marker_map: Dict[str, Dict[str, Any]],
+    output_cfg: Dict[str, Any],
+    source: BuildSource,
+    progress: Progress,
+    bold_spool_f,
+    lock: Lock,
+    counters: Dict[str, int],
+    source_merge_rows: List[Dict[str, str]],
+    ncbi_accessions: set,
+    spool_dir: Path,
+    run_logger: logging.Logger,
+) -> None:
+    specimen_count = prepared_query.specimen_count
+    if specimen_count == 0:
+        run_logger.info(
+            "# bold query:"
+            f" taxon={resolved_taxon.scientific_name}"
+            f" normalized={prepared_query.normalized_query}"
+            f" specimens=0 downloaded=0 matched=0"
+        )
+        console.print(
+            f"[yellow]BOLD {resolved_taxon.scientific_name}: 0 records "
+            f"(NCBI scientific name mismatch may be involved)[/yellow]"
+        )
+        return
+
+    if not prepared_query.query_id:
+        raise typer.BadParameter("BOLD query preparation did not return a query_id.")
+
+    download_ext = "json" if prepared_query.download_format == "json" else "tsv"
+    query_hash = hashlib.sha1(prepared_query.query_id.encode("utf-8")).hexdigest()[:12]
+    download_path = spool_dir / f"bold_{query_hash}.{download_ext}"
+    task_id = progress.add_task(
+        f"BOLD {resolved_taxon.scientific_name}: download",
+        total=None,
+    )
+    last_download_report = {"bytes": 0}
+
+    def on_bold_download_progress(downloaded_bytes: int, content_length: Optional[int]) -> None:
+        threshold = 1024 * 1024
+        if downloaded_bytes - last_download_report["bytes"] < threshold and downloaded_bytes != 0:
+            return
+        last_download_report["bytes"] = downloaded_bytes
+        progress.update(
+            task_id,
+            description=build_bold_download_description(
+                resolved_taxon.scientific_name,
+                downloaded_bytes,
+                content_length,
+            ),
+        )
+
+    try:
+        download_meta = download_documents_to_path(
+            prepared_query.query_id,
+            prepared_query.runtime_cfg,
+            download_path,
+            fmt=prepared_query.download_format,
+            progress_callback=on_bold_download_progress,
+        )
+
+        downloaded_rows = 0
+        matched_rows = 0
+        buffered_records: List[CanonicalRecord] = []
+        progress.update(
+            task_id,
+            description=f"BOLD {resolved_taxon.scientific_name}: filter",
+            total=specimen_count,
+            completed=0,
+        )
+        for row in iter_document_rows_from_path(download_path, prepared_query.download_format):
+            downloaded_rows += 1
+            counters["total_records"] += 1
+            if specimen_count is not None and downloaded_rows > specimen_count:
+                progress.update(task_id, total=downloaded_rows)
+            progress.update(task_id, advance=1)
+
+            normalized = normalize_bold_row(row, marker_keys, marker_map)
+            if not normalized:
+                continue
+
+            matched_rows += 1
+            counters["matched_records"] += 1
+            counters["matched_features"] += 1
+
+            record = build_bold_canonical_record(normalized, marker_map, output_cfg)
+            accession_tokens = parse_accession_tokens(record.accession)
+            if source == BuildSource.BOTH and accession_tokens and any(
+                token in ncbi_accessions for token in accession_tokens
+            ):
+                record.linked_to_ncbi = True
+                record.emitted_to_fasta = False
+                record.skip_reason = "linked_by_insdcacs"
+                source_merge_rows.append(build_source_merge_row(record))
+                continue
+
+            buffered_records.append(record)
+            if len(buffered_records) >= 1000:
+                append_records_to_spool(buffered_records, bold_spool_f, lock)
+                buffered_records.clear()
+
+        if buffered_records:
+            append_records_to_spool(buffered_records, bold_spool_f, lock)
+
+        run_logger.info(
+            "# bold query:"
+            f" taxon={resolved_taxon.scientific_name}"
+            f" normalized={prepared_query.normalized_query}"
+            f" specimens={specimen_count}"
+            f" format={prepared_query.download_format}"
+            f" bytes={download_meta.get('downloaded_bytes')}"
+            f" downloaded={downloaded_rows}"
+            f" matched={matched_rows}"
+        )
+    finally:
+        progress.remove_task(task_id)
+        download_path.unlink(missing_ok=True)
 
 
 def extract_ncbi_records_from_genbank_chunk(
@@ -2520,24 +2673,45 @@ def close_run_logger(logger: logging.Logger) -> None:
 
 
 class TeeStream:
-    def __init__(self, *streams) -> None:
-        self._streams = streams
+    ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    def __init__(self, primary_stream, mirror_stream=None) -> None:
+        self._primary_stream = primary_stream
+        self._mirror_stream = mirror_stream
+        self._mirror_buffer = ""
 
     def write(self, data: str) -> int:
-        for stream in self._streams:
-            stream.write(data)
+        self._primary_stream.write(data)
+        if self._mirror_stream is not None:
+            self._write_mirror(data)
         return len(data)
 
+    def _write_mirror(self, data: str) -> None:
+        if not data:
+            return
+        self._mirror_buffer += data
+        while "\n" in self._mirror_buffer:
+            line, self._mirror_buffer = self._mirror_buffer.split("\n", 1)
+            if "\r" in line:
+                continue
+            cleaned = self.ANSI_ESCAPE_RE.sub("", line)
+            self._mirror_stream.write(cleaned + "\n")
+
     def flush(self) -> None:
-        for stream in self._streams:
-            stream.flush()
+        self._primary_stream.flush()
+        if self._mirror_stream is not None:
+            if self._mirror_buffer and "\r" not in self._mirror_buffer:
+                cleaned = self.ANSI_ESCAPE_RE.sub("", self._mirror_buffer)
+                self._mirror_stream.write(cleaned)
+            self._mirror_buffer = ""
+            self._mirror_stream.flush()
 
     def isatty(self) -> bool:
-        return bool(getattr(self._streams[0], "isatty", lambda: False)())
+        return bool(getattr(self._primary_stream, "isatty", lambda: False)())
 
     @property
     def encoding(self) -> str:
-        return getattr(self._streams[0], "encoding", "utf-8")
+        return getattr(self._primary_stream, "encoding", "utf-8")
 
 
 @contextmanager
@@ -3127,48 +3301,28 @@ def build(
                         ncbi_accessions = set(acc_to_seqs.keys())
                         for resolved_taxon in resolved_taxa:
                             try:
-                                bold_rows, bold_stats = fetch_bold_records_for_taxon(
+                                prepared_query = prepare_bold_query(
                                     resolved_taxon.scientific_name,
+                                    cfg.get("bold"),
+                                )
+                                process_bold_taxon_to_spool(
+                                    resolved_taxon,
+                                    prepared_query,
                                     marker_keys,
                                     marker_map,
-                                    cfg.get("bold"),
+                                    output_cfg,
+                                    source,
+                                    progress,
+                                    bold_spool_f,
+                                    lock,
+                                    counters,
+                                    source_merge_rows,
+                                    ncbi_accessions,
+                                    spool_dir,
+                                    run_logger,
                                 )
                             except BoldApiError as exc:
                                 raise typer.BadParameter(str(exc)) from exc
-                            counters["total_records"] += int(bold_stats.get("downloaded_rows") or 0)
-                            counters["matched_records"] += int(bold_stats.get("matched_rows") or 0)
-                            counters["matched_features"] += int(bold_stats.get("matched_rows") or 0)
-                            run_logger.info(
-                                "# bold query:"
-                                f" taxon={resolved_taxon.scientific_name}"
-                                f" normalized={bold_stats.get('normalized_query')}"
-                                f" specimens={bold_stats.get('specimen_count')}"
-                                f" downloaded={bold_stats.get('downloaded_rows')}"
-                                f" matched={bold_stats.get('matched_rows')}"
-                            )
-                            if bold_stats.get("specimen_count") == 0:
-                                console.print(
-                                    f"[yellow]BOLD {resolved_taxon.scientific_name}: 0 records "
-                                    f"(NCBI scientific name mismatch may be involved)[/yellow]"
-                                )
-                                continue
-
-                            bold_records = [
-                                build_bold_canonical_record(row, marker_map, output_cfg) for row in bold_rows
-                            ]
-                            kept_bold_records: List[CanonicalRecord] = []
-                            for record in bold_records:
-                                accession_tokens = parse_accession_tokens(record.accession)
-                                if source == BuildSource.BOTH and accession_tokens and any(
-                                    token in ncbi_accessions for token in accession_tokens
-                                ):
-                                    record.linked_to_ncbi = True
-                                    record.emitted_to_fasta = False
-                                    record.skip_reason = "linked_by_insdcacs"
-                                    source_merge_rows.append(build_source_merge_row(record))
-                                    continue
-                                kept_bold_records.append(record)
-                            append_records_to_spool(kept_bold_records, bold_spool_f, lock)
 
                 ncbi_records = load_records_from_spool(ncbi_spool_path)
                 bold_records = load_records_from_spool(bold_spool_path)
