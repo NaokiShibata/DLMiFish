@@ -40,6 +40,18 @@ const DEFAULT_OUTPUT_MIFISH_HEADER_FORMAT: &str = "{db}|{acc_id}|{organism}";
 static MARKERS_TEMPLATE: &str = include_str!("../../resources/templates/markers_mitogenome.toml");
 static PRIMERS_TEMPLATE: &str = include_str!("../../resources/templates/primers.toml");
 
+static RE_LOG_LINE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?P<body>.*)$",
+    )
+    .expect("log line regex")
+});
+static RE_LOG_PREFIX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\s+",
+    )
+    .expect("log prefix regex")
+});
 static RE_QUERY_COUNT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^# query count taxid=([^:]+):\s*(.+)$").expect("query count regex"));
 static RE_FETCH_PROGRESS: Lazy<Regex> = Lazy::new(|| {
@@ -318,6 +330,7 @@ impl ProgressParser {
     }
 
     fn consume_line(&mut self, line: &str) -> bool {
+        let line = strip_log_prefix(line);
         let mut changed = false;
 
         if let Some(caps) = RE_QUERY_COUNT.captures(line) {
@@ -596,6 +609,33 @@ fn log_event(line: String) -> RunEvent {
     }
 }
 
+fn format_monitor_log_line(line: &str) -> String {
+    let (timestamp, level, body) = if let Some(caps) = RE_LOG_LINE.captures(line) {
+        (
+            caps.name("ts").map(|m| m.as_str()).unwrap_or("").trim(),
+            caps.name("level").map(|m| m.as_str()).unwrap_or("").trim(),
+            caps.name("body").map(|m| m.as_str()).unwrap_or("").trim(),
+        )
+    } else {
+        ("", "", line.trim())
+    };
+
+    let shortened = if let Some(rest) = body.strip_prefix("# error:") {
+        rest.trim().to_string()
+    } else if let Some(rest) = body.strip_prefix("# warn:") {
+        rest.trim().to_string()
+    } else if let Some(rest) = body.strip_prefix("# ") {
+        rest.trim().to_string()
+    } else {
+        body.to_string()
+    };
+
+    match (timestamp.is_empty(), level.is_empty()) {
+        (false, false) => format!("{timestamp} {level:<5} {shortened}"),
+        _ => shortened,
+    }
+}
+
 fn progress_event(parser: &ProgressParser) -> RunEvent {
     RunEvent {
         event_type: "progress".to_string(),
@@ -716,12 +756,30 @@ fn toml_quote(s: &str) -> String {
 }
 
 fn append_log_line(log_path: &Path, line: &str) -> Result<(), String> {
+    append_log_with_level(log_path, "INFO", line)
+}
+
+fn append_log_with_level(log_path: &Path, level: &str, line: &str) -> Result<(), String> {
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .map_err(|e| format!("failed to open log {}: {e}", log_path.display()))?;
-    writeln!(f, "{line}").map_err(|e| format!("failed to append log {}: {e}", log_path.display()))
+    writeln!(
+        f,
+        "{} {:<5} {line}",
+        Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+        level
+    )
+    .map_err(|e| format!("failed to append log {}: {e}", log_path.display()))
+}
+
+fn strip_log_prefix(line: &str) -> &str {
+    if let Some(matched) = RE_LOG_PREFIX.find(line) {
+        &line[matched.end()..]
+    } else {
+        line
+    }
 }
 
 fn run_post_prep_rust(
@@ -1176,7 +1234,7 @@ fn tail_log_once(
     let text = String::from_utf8_lossy(&data);
 
     for line in text.lines() {
-        emit_event(app, log_event(line.to_string()));
+        emit_event(app, log_event(format_monitor_log_line(line)));
         if parser.consume_line(line) {
             emit_event(app, progress_event(parser));
         }

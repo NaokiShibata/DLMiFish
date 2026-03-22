@@ -1,3 +1,4 @@
+use chrono::Local;
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
@@ -8,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use toml::Value as TomlValue;
 
 const DEFAULT_FEATURE_TYPES: [&str; 3] = ["rRNA", "gene", "CDS"];
@@ -16,7 +17,7 @@ const DEFAULT_FEATURE_FIELDS: [&str; 4] = ["gene", "product", "note", "standard_
 const DEFAULT_HEADER_FORMAT: &str = "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
 const DEFAULT_BOLD_HEADER_FORMAT: &str = "bold|{acc_id}|{organism}";
 const BOLD_DEFAULT_BASE_URL: &str = "https://portal.boldsystems.org/api";
-const BOLD_DEFAULT_TIMEOUT_SEC: f64 = 60.0;
+const BOLD_DEFAULT_TIMEOUT_SEC: f64 = 900.0;
 const BOLD_DEFAULT_RETRIES: u64 = 3;
 const BOLD_DEFAULT_BACKOFF_SEC: f64 = 1.5;
 const BOLD_DEFAULT_DOWNLOAD_FORMAT: &str = "tsv";
@@ -1081,12 +1082,73 @@ fn resolve_taxon(taxon: &str) -> Result<ResolvedTaxon, String> {
 }
 
 fn append_log_line(log_path: &Path, line: &str) -> Result<(), String> {
+    append_log_with_level(log_path, "INFO", line)
+}
+
+fn append_error_log_line(log_path: &Path, line: &str) -> Result<(), String> {
+    append_log_with_level(log_path, "ERROR", line)
+}
+
+fn append_log_with_level(log_path: &Path, level: &str, line: &str) -> Result<(), String> {
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .map_err(|e| format!("failed to open log {}: {e}", log_path.display()))?;
-    writeln!(f, "{line}").map_err(|e| format!("failed to write log {}: {e}", log_path.display()))
+    writeln!(f, "{} {:<5} {line}", log_timestamp_now(), level)
+        .map_err(|e| format!("failed to write log {}: {e}", log_path.display()))
+}
+
+fn log_timestamp_now() -> String {
+    Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
+}
+
+fn append_run_header(
+    log_path: &Path,
+    params: &BuildParams,
+    source: &str,
+    resolved_taxa: &[ResolvedTaxon],
+    marker_keys: &[String],
+    started_at: &str,
+) -> Result<(), String> {
+    append_log_line(log_path, "# runner: rust-runner")?;
+    append_log_line(log_path, &format!("# started_at: {started_at}"))?;
+    append_log_line(log_path, &format!("# log_path: {}", log_path.display()))?;
+    append_log_line(
+        log_path,
+        &format!("# output_file: {}", params.output_file.display()),
+    )?;
+    append_log_line(
+        log_path,
+        &format!("# dump_gb_dir: {}", params.dump_gb_dir.display()),
+    )?;
+    append_log_line(log_path, &format!("# source: {source}"))?;
+    append_log_line(
+        log_path,
+        &format!("# config: {}", params.config_path.display()),
+    )?;
+    append_log_line(log_path, &format!("# resume: {}", params.resume))?;
+    append_log_line(
+        log_path,
+        &format!(
+            "# taxids: {:?}",
+            resolved_taxa
+                .iter()
+                .map(|item| item.taxid.clone())
+                .collect::<Vec<_>>()
+        ),
+    )?;
+    append_log_line(
+        log_path,
+        &format!(
+            "# scientific_names: {:?}",
+            resolved_taxa
+                .iter()
+                .map(|item| item.scientific_name.clone())
+                .collect::<Vec<_>>()
+        ),
+    )?;
+    append_log_line(log_path, &format!("# markers: {:?}", marker_keys))
 }
 
 fn toml_string(tbl: &toml::map::Map<String, TomlValue>, key: &str, default: &str) -> String {
@@ -1464,12 +1526,13 @@ fn eutils_get_json(endpoint: &str, params: &[(&str, String)]) -> Result<JsonValu
 }
 
 fn curl_should_retry(exit_code: Option<i32>, stderr: &str) -> bool {
-    matches!(exit_code, Some(18 | 28 | 52 | 55 | 56))
+    matches!(exit_code, Some(18 | 28 | 52 | 55 | 56 | 92))
         || stderr.contains("Transferred a partial file")
         || stderr.contains("Operation timed out")
         || stderr.contains("Empty reply from server")
         || stderr.contains("Failure when receiving data from the peer")
         || stderr.contains("Send failure")
+        || stderr.contains("HTTP/2 stream")
 }
 
 fn eutils_request_text(
@@ -1483,7 +1546,7 @@ fn eutils_request_text(
 
     for attempt in 0..=retries {
         let mut cmd = Command::new("curl");
-        cmd.arg("-fsSL").arg(url.clone());
+        cmd.arg("-fsSL").arg("--http1.1").arg(url.clone());
         for (k, v) in params {
             if use_get {
                 cmd.arg("--get");
@@ -1508,6 +1571,33 @@ fn eutils_request_text(
     Err("curl failed after retries".to_string())
 }
 
+fn eutils_get_validated_json<F>(
+    endpoint: &str,
+    params: &[(&str, String)],
+    validate: F,
+    invalid_payload_message: &str,
+) -> Result<JsonValue, String>
+where
+    F: Fn(&JsonValue) -> bool,
+{
+    let retries = 3u64;
+    let backoff_sec = 1.5f64;
+    let mut last_error: Option<String> = None;
+
+    for attempt in 0..=retries {
+        match eutils_get_json(endpoint, params) {
+            Ok(json) if validate(&json) => return Ok(json),
+            Ok(_) => last_error = Some(invalid_payload_message.to_string()),
+            Err(err) => last_error = Some(err),
+        }
+        if attempt < retries {
+            thread::sleep(Duration::from_secs_f64(backoff_sec * (attempt + 1) as f64));
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| invalid_payload_message.to_string()))
+}
+
 fn eutils_get_text(endpoint: &str, params: &[(&str, String)]) -> Result<String, String> {
     eutils_request_text(endpoint, params, true)
 }
@@ -1521,7 +1611,7 @@ fn resolve_taxid(taxon: &str) -> Result<String, String> {
         return Ok(taxon.to_string());
     }
     let term = format!("\"{taxon}\"[Scientific Name]");
-    let json = eutils_get_json(
+    let json = eutils_get_validated_json(
         "esearch.fcgi",
         &[
             ("db", "taxonomy".to_string()),
@@ -1529,6 +1619,13 @@ fn resolve_taxid(taxon: &str) -> Result<String, String> {
             ("retmax", "5".to_string()),
             ("retmode", "json".to_string()),
         ],
+        |json| {
+            json.get("esearchresult")
+                .and_then(|v| v.get("idlist"))
+                .and_then(|v| v.as_array())
+                .is_some()
+        },
+        "taxonomy search returned invalid payload",
     )?;
     let ids = json
         .get("esearchresult")
@@ -2062,313 +2159,323 @@ pub fn run_build(
     cancelled: &AtomicBool,
     _child_slot: &Arc<Mutex<Option<Child>>>,
 ) -> Result<(), String> {
-    let source = normalize_build_source(&params.source);
-    let uses_ncbi = source_uses_ncbi(&source);
-    let uses_bold = source_uses_bold(&source);
-    let cfg = parse_toml(&params.config_path)?;
-    let cfg_tbl = cfg
-        .as_table()
-        .ok_or_else(|| "config root must be a TOML table".to_string())?;
-    let ncbi = cfg_tbl.get("ncbi").and_then(|v| v.as_table());
-    if uses_ncbi && ncbi.is_none() {
-        return Err("missing [ncbi] section".to_string());
-    }
-    let bold_cfg = cfg_tbl.get("bold").and_then(|v| v.as_table());
-    let markers_tbl = load_markers_table(cfg_tbl, &params.config_path)?;
-    let output_tbl = cfg_tbl.get("output").and_then(|v| v.as_table());
-    let filters_tbl = cfg_tbl.get("filters").and_then(|v| v.as_table());
-    let taxon_noexp = cfg_tbl
-        .get("taxon")
-        .and_then(|v| v.as_table())
-        .map(|t| toml_bool(t, "noexp", false))
-        .unwrap_or(false);
-    let empty_ncbi_tbl = toml::map::Map::new();
-    let ncbi_tbl = ncbi.unwrap_or(&empty_ncbi_tbl);
-
-    let db = toml_string(ncbi_tbl, "db", "nucleotide");
-    let rettype = toml_string(ncbi_tbl, "rettype", "gb");
-    let retmode = toml_string(ncbi_tbl, "retmode", "text");
-    if rettype != "gb" && rettype != "gbwithparts" {
-        return Err("ncbi.rettype must be 'gb' or 'gbwithparts'".to_string());
-    }
-    let per_query = toml_u64(ncbi_tbl, "per_query", 100).max(1);
-    let delay_sec = toml_f64(ncbi_tbl, "delay_sec").unwrap_or(0.34);
-    let email = toml_string(ncbi_tbl, "email", "");
-    let api_key = toml_string(ncbi_tbl, "api_key", "");
-    let bold_runtime_cfg = if uses_bold {
-        Some(get_bold_runtime_config(bold_cfg)?)
-    } else {
-        None
-    };
-
-    let mut marker_keys = Vec::new();
-    for m in &params.markers {
-        marker_keys.push(resolve_marker_key(m, &markers_tbl)?);
-    }
-
-    let mut marker_terms = Vec::new();
-    let mut marker_rules = Vec::new();
-    for key in &marker_keys {
-        let marker_cfg = markers_tbl
-            .get(key)
+    let started_at = log_timestamp_now();
+    let started_clock = Instant::now();
+    let run_result = (|| -> Result<(), String> {
+        let source = normalize_build_source(&params.source);
+        let uses_ncbi = source_uses_ncbi(&source);
+        let uses_bold = source_uses_bold(&source);
+        let cfg = parse_toml(&params.config_path)?;
+        let cfg_tbl = cfg
+            .as_table()
+            .ok_or_else(|| "config root must be a TOML table".to_string())?;
+        let ncbi = cfg_tbl.get("ncbi").and_then(|v| v.as_table());
+        if uses_ncbi && ncbi.is_none() {
+            return Err("missing [ncbi] section".to_string());
+        }
+        let bold_cfg = cfg_tbl.get("bold").and_then(|v| v.as_table());
+        let markers_tbl = load_markers_table(cfg_tbl, &params.config_path)?;
+        let output_tbl = cfg_tbl.get("output").and_then(|v| v.as_table());
+        let filters_tbl = cfg_tbl.get("filters").and_then(|v| v.as_table());
+        let taxon_noexp = cfg_tbl
+            .get("taxon")
             .and_then(|v| v.as_table())
-            .ok_or_else(|| format!("markers.{key} must be a table"))?;
-        if uses_ncbi {
-            marker_terms.extend(marker_query_terms(marker_cfg));
+            .map(|t| toml_bool(t, "noexp", false))
+            .unwrap_or(false);
+        let empty_ncbi_tbl = toml::map::Map::new();
+        let ncbi_tbl = ncbi.unwrap_or(&empty_ncbi_tbl);
+
+        let db = toml_string(ncbi_tbl, "db", "nucleotide");
+        let rettype = toml_string(ncbi_tbl, "rettype", "gb");
+        let retmode = toml_string(ncbi_tbl, "retmode", "text");
+        if rettype != "gb" && rettype != "gbwithparts" {
+            return Err("ncbi.rettype must be 'gb' or 'gbwithparts'".to_string());
+        }
+        let per_query = toml_u64(ncbi_tbl, "per_query", 100).max(1);
+        let delay_sec = toml_f64(ncbi_tbl, "delay_sec").unwrap_or(0.34);
+        let email = toml_string(ncbi_tbl, "email", "");
+        let api_key = toml_string(ncbi_tbl, "api_key", "");
+        let bold_runtime_cfg = if uses_bold {
+            Some(get_bold_runtime_config(bold_cfg)?)
+        } else {
+            None
+        };
+
+        let mut marker_keys = Vec::new();
+        for m in &params.markers {
+            marker_keys.push(resolve_marker_key(m, &markers_tbl)?);
         }
 
-        let pats = region_patterns(marker_cfg)
-            .into_iter()
-            .map(|p| Regex::new(&p).map_err(|e| format!("invalid regex in markers.{key}: {e}")))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut marker_terms = Vec::new();
+        let mut marker_rules = Vec::new();
+        for key in &marker_keys {
+            let marker_cfg = markers_tbl
+                .get(key)
+                .and_then(|v| v.as_table())
+                .ok_or_else(|| format!("markers.{key} must be a table"))?;
+            if uses_ncbi {
+                marker_terms.extend(marker_query_terms(marker_cfg));
+            }
 
-        let feature_types = marker_cfg
-            .get("feature_types")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty())
-            .or_else(|| {
-                Some(
-                    DEFAULT_FEATURE_TYPES
+            let pats = region_patterns(marker_cfg)
+                .into_iter()
+                .map(|p| Regex::new(&p).map_err(|e| format!("invalid regex in markers.{key}: {e}")))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let feature_types = marker_cfg
+                .get("feature_types")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    Some(
+                        DEFAULT_FEATURE_TYPES
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect(),
+                    )
+                });
+
+            let feature_fields = marker_cfg
+                .get("feature_fields")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| {
+                    DEFAULT_FEATURE_FIELDS
                         .iter()
                         .map(|s| s.to_string())
-                        .collect(),
-                )
-            });
+                        .collect()
+                });
 
-        let feature_fields = marker_cfg
-            .get("feature_fields")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| {
-                DEFAULT_FEATURE_FIELDS
+            if uses_ncbi {
+                marker_rules.push(MarkerRule {
+                    key: key.clone(),
+                    patterns: pats,
+                    feature_types,
+                    feature_fields,
+                    header_format: resolve_header_format(marker_cfg, output_tbl),
+                });
+            }
+        }
+        if uses_ncbi && marker_terms.is_empty() {
+            return Err("no marker terms resolved".to_string());
+        }
+        let marker_query = if !uses_ncbi {
+            String::new()
+        } else if marker_terms.len() == 1 {
+            marker_terms[0].clone()
+        } else {
+            format!(
+                "({})",
+                marker_terms
                     .iter()
-                    .map(|s| s.to_string())
-                    .collect()
-            });
+                    .map(|t| format!("({t})"))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            )
+        };
+        let filter_terms = build_filter_terms(filters_tbl)?;
 
-        if uses_ncbi {
-            marker_rules.push(MarkerRule {
-                key: key.clone(),
-                patterns: pats,
-                feature_types,
-                feature_fields,
-                header_format: resolve_header_format(marker_cfg, output_tbl),
-            });
-        }
-    }
-    if uses_ncbi && marker_terms.is_empty() {
-        return Err("no marker terms resolved".to_string());
-    }
-    let marker_query = if !uses_ncbi {
-        String::new()
-    } else if marker_terms.len() == 1 {
-        marker_terms[0].clone()
-    } else {
-        format!(
-            "({})",
-            marker_terms
-                .iter()
-                .map(|t| format!("({t})"))
-                .collect::<Vec<_>>()
-                .join(" OR ")
-        )
-    };
-    let filter_terms = build_filter_terms(filters_tbl)?;
-
-    let mut resolved_taxa = Vec::new();
-    for t in &params.taxids {
-        resolved_taxa.push(resolve_taxon(t)?);
-    }
-
-    append_log_line(log_path, "# started: rust-runner")?;
-    append_log_line(log_path, &format!("# source: {source}"))?;
-    append_log_line(
-        log_path,
-        &format!("# config: {}", params.config_path.display()),
-    )?;
-    append_log_line(
-        log_path,
-        &format!(
-            "# taxids: {:?}",
-            resolved_taxa
-                .iter()
-                .map(|item| item.taxid.clone())
-                .collect::<Vec<_>>()
-        ),
-    )?;
-    append_log_line(
-        log_path,
-        &format!(
-            "# scientific_names: {:?}",
-            resolved_taxa
-                .iter()
-                .map(|item| item.scientific_name.clone())
-                .collect::<Vec<_>>()
-        ),
-    )?;
-    append_log_line(log_path, &format!("# markers: {:?}", marker_keys))?;
-
-    let mut out = File::create(&params.output_file)
-        .map_err(|e| format!("failed to create {}: {e}", params.output_file.display()))?;
-
-    let mut acc_to_seqs: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut dup_accessions: HashMap<String, u64> = HashMap::new();
-    let mut counters = Counters::default();
-    let mut emitted_records = Vec::new();
-    let mut source_merge_rows = Vec::new();
-
-    for resolved_taxon in &resolved_taxa {
-        if !uses_ncbi {
-            break;
-        }
-        let taxid = resolved_taxon.taxid.clone();
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("cancelled".to_string());
+        let mut resolved_taxa = Vec::new();
+        for t in &params.taxids {
+            resolved_taxa.push(resolve_taxon(t)?);
         }
 
-        let query = build_query(&taxid, &marker_query, &filter_terms, taxon_noexp);
-        append_log_line(log_path, &format!("# query taxid={taxid}: {query}"))?;
-
-        let mut search_params = vec![
-            ("db", db.clone()),
-            ("term", query.clone()),
-            ("retmax", "0".to_string()),
-            ("retmode", "json".to_string()),
-        ];
-        if !email.is_empty() {
-            search_params.push(("email", email.clone()));
-        }
-        if !api_key.is_empty() {
-            search_params.push(("api_key", api_key.clone()));
-        }
-        let json = eutils_get_json("esearch.fcgi", &search_params)?;
-        let count = json
-            .get("esearchresult")
-            .and_then(|v| v.get("count"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        append_log_line(log_path, &format!("# query count taxid={taxid}: {count}"))?;
-        append_log_line(
+        append_run_header(
             log_path,
-            &format!("# fetch progress taxid={taxid}: 0/{count}"),
+            params,
+            &source,
+            &resolved_taxa,
+            &marker_keys,
+            &started_at,
         )?;
-        if count == 0 {
-            continue;
-        }
 
-        let cache_root = params.dump_gb_dir.join(".cache");
-        fs::create_dir_all(&cache_root)
-            .map_err(|e| format!("failed to create {}: {e}", cache_root.display()))?;
-        let taxid_dump_dir = params.dump_gb_dir.join(format!("taxid{taxid}"));
+        let mut out = File::create(&params.output_file)
+            .map_err(|e| format!("failed to create {}: {e}", params.output_file.display()))?;
 
-        let mut start = 0u64;
-        while start < count {
+        let mut acc_to_seqs: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut dup_accessions: HashMap<String, u64> = HashMap::new();
+        let mut counters = Counters::default();
+        let mut emitted_records = Vec::new();
+        let mut source_merge_rows = Vec::new();
+
+        for resolved_taxon in &resolved_taxa {
+            if !uses_ncbi {
+                break;
+            }
+            let taxid = resolved_taxon.taxid.clone();
             if cancelled.load(Ordering::Relaxed) {
                 return Err("cancelled".to_string());
             }
-            let cache_path = cache_root.join(format!("start{start:09}_count{per_query:04}.cache"));
-            let chunk = if params.resume && cache_path.exists() {
-                fs::read_to_string(&cache_path)
-                    .map_err(|e| format!("failed to read {}: {e}", cache_path.display()))?
-            } else {
-                let ids_json = eutils_get_json(
-                    "esearch.fcgi",
-                    &[
+
+            let query = build_query(&taxid, &marker_query, &filter_terms, taxon_noexp);
+            append_log_line(log_path, &format!("# query taxid={taxid}: {query}"))?;
+
+            let mut search_params = vec![
+                ("db", db.clone()),
+                ("term", query.clone()),
+                ("retmax", "0".to_string()),
+                ("retmode", "json".to_string()),
+            ];
+            if !email.is_empty() {
+                search_params.push(("email", email.clone()));
+            }
+            if !api_key.is_empty() {
+                search_params.push(("api_key", api_key.clone()));
+            }
+            let json = eutils_get_validated_json(
+                "esearch.fcgi",
+                &search_params,
+                |json| {
+                    json.get("esearchresult")
+                        .and_then(|v| v.get("count"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .is_some()
+                },
+                "esearch count parse failed",
+            )?;
+            let count = json
+                .get("esearchresult")
+                .and_then(|v| v.get("count"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            append_log_line(log_path, &format!("# query count taxid={taxid}: {count}"))?;
+            append_log_line(
+                log_path,
+                &format!("# fetch progress taxid={taxid}: 0/{count}"),
+            )?;
+            if count == 0 {
+                continue;
+            }
+
+            let cache_root = params.dump_gb_dir.join(".cache");
+            fs::create_dir_all(&cache_root)
+                .map_err(|e| format!("failed to create {}: {e}", cache_root.display()))?;
+            let taxid_dump_dir = params.dump_gb_dir.join(format!("taxid{taxid}"));
+
+            let mut start = 0u64;
+            while start < count {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err("cancelled".to_string());
+                }
+                let cache_path =
+                    cache_root.join(format!("start{start:09}_count{per_query:04}.cache"));
+                let chunk = if params.resume && cache_path.exists() {
+                    fs::read_to_string(&cache_path)
+                        .map_err(|e| format!("failed to read {}: {e}", cache_path.display()))?
+                } else {
+                    let mut ids_params = vec![
                         ("db", db.clone()),
                         ("term", query.clone()),
                         ("retstart", start.to_string()),
                         ("retmax", per_query.to_string()),
                         ("retmode", "json".to_string()),
-                    ],
+                    ];
+                    if !email.is_empty() {
+                        ids_params.push(("email", email.clone()));
+                    }
+                    if !api_key.is_empty() {
+                        ids_params.push(("api_key", api_key.clone()));
+                    }
+                    let ids_json = eutils_get_validated_json(
+                        "esearch.fcgi",
+                        &ids_params,
+                        |json| {
+                            json.get("esearchresult")
+                                .and_then(|v| v.get("idlist"))
+                                .and_then(|v| v.as_array())
+                                .is_some()
+                        },
+                        "esearch idlist parse failed",
+                    )?;
+                    let ids = ids_json
+                        .get("esearchresult")
+                        .and_then(|v| v.get("idlist"))
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| "esearch idlist parse failed".to_string())?
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>();
+                    if ids.is_empty() {
+                        start = start.saturating_add(per_query);
+                        continue;
+                    }
+                    let mut fetch_params = vec![
+                        ("db", db.clone()),
+                        ("rettype", rettype.clone()),
+                        ("retmode", retmode.clone()),
+                        ("id", ids.join(",")),
+                    ];
+                    if !email.is_empty() {
+                        fetch_params.push(("email", email.clone()));
+                    }
+                    if !api_key.is_empty() {
+                        fetch_params.push(("api_key", api_key.clone()));
+                    }
+                    // efetch with many IDs can exceed URL length when sent as GET.
+                    // Use POST to avoid 414 URI Too Long.
+                    let text = eutils_post_text("efetch.fcgi", &fetch_params)?;
+                    let _ = fs::write(&cache_path, &text);
+                    text
+                };
+
+                process_genbank_chunk(
+                    &chunk,
+                    &marker_rules,
+                    &mut acc_to_seqs,
+                    &mut out,
+                    &mut counters,
+                    &mut dup_accessions,
+                    &mut emitted_records,
+                    &mut source_merge_rows,
+                    Some(&taxid_dump_dir),
                 )?;
-                let ids = ids_json
-                    .get("esearchresult")
-                    .and_then(|v| v.get("idlist"))
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| "esearch idlist parse failed".to_string())?
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>();
-                if ids.is_empty() {
-                    start = start.saturating_add(per_query);
-                    continue;
-                }
-                let mut fetch_params = vec![
-                    ("db", db.clone()),
-                    ("rettype", rettype.clone()),
-                    ("retmode", retmode.clone()),
-                    ("id", ids.join(",")),
-                ];
-                if !email.is_empty() {
-                    fetch_params.push(("email", email.clone()));
-                }
-                if !api_key.is_empty() {
-                    fetch_params.push(("api_key", api_key.clone()));
-                }
-                // efetch with many IDs can exceed URL length when sent as GET.
-                // Use POST to avoid 414 URI Too Long.
-                let text = eutils_post_text("efetch.fcgi", &fetch_params)?;
-                let _ = fs::write(&cache_path, &text);
-                text
-            };
 
-            process_genbank_chunk(
-                &chunk,
-                &marker_rules,
-                &mut acc_to_seqs,
-                &mut out,
-                &mut counters,
-                &mut dup_accessions,
-                &mut emitted_records,
-                &mut source_merge_rows,
-                Some(&taxid_dump_dir),
-            )?;
-
-            let fetched = (start + per_query).min(count);
-            append_log_line(
-                log_path,
-                &format!("# fetch progress taxid={taxid}: {fetched}/{count}"),
-            )?;
-            start = start.saturating_add(per_query);
-            if delay_sec > 0.0 {
-                std::thread::sleep(std::time::Duration::from_secs_f64(delay_sec));
+                let fetched = (start + per_query).min(count);
+                append_log_line(
+                    log_path,
+                    &format!("# fetch progress taxid={taxid}: {fetched}/{count}"),
+                )?;
+                start = start.saturating_add(per_query);
+                if delay_sec > 0.0 {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(delay_sec));
+                }
             }
         }
-    }
 
-    if uses_bold {
-        let mut bold_records = Vec::new();
-        for resolved_taxon in &resolved_taxa {
-            if cancelled.load(Ordering::Relaxed) {
-                return Err("cancelled".to_string());
-            }
-            let (rows, stats) = fetch_bold_records_for_taxon_with_logging(
-                &resolved_taxon.scientific_name,
-                &marker_keys,
-                &markers_tbl,
-                output_tbl,
-                bold_runtime_cfg
-                    .as_ref()
-                    .ok_or_else(|| "missing BOLD runtime config".to_string())?,
-                log_path,
-            )?;
-            counters.total_records += stats.downloaded_rows;
-            counters.matched_records += stats.matched_rows;
-            counters.matched_features += stats.matched_rows;
-            append_log_line(
+        if uses_bold {
+            let mut bold_records = Vec::new();
+            for resolved_taxon in &resolved_taxa {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err("cancelled".to_string());
+                }
+                let (rows, stats) = fetch_bold_records_for_taxon_with_logging(
+                    &resolved_taxon.scientific_name,
+                    &marker_keys,
+                    &markers_tbl,
+                    output_tbl,
+                    bold_runtime_cfg
+                        .as_ref()
+                        .ok_or_else(|| "missing BOLD runtime config".to_string())?,
+                    log_path,
+                )?;
+                counters.total_records += stats.downloaded_rows;
+                counters.matched_records += stats.matched_rows;
+                counters.matched_features += stats.matched_rows;
+                append_log_line(
                 log_path,
                 &format!(
                     "# bold query: taxon={} normalized={} specimens={} format={} bytes={} downloaded={} matched={}",
@@ -2381,99 +2488,114 @@ pub fn run_build(
                     stats.matched_rows
                 ),
             )?;
-            bold_records.extend(rows);
-        }
-        bold_records.sort_by(|left, right| {
-            left.taxon_name
-                .cmp(&right.taxon_name)
-                .then(left.marker_key.cmp(&right.marker_key))
-                .then(left.source_record_id.cmp(&right.source_record_id))
-        });
-
-        let ncbi_accessions = acc_to_seqs.keys().cloned().collect::<HashSet<_>>();
-        for record in bold_records {
-            let accession_tokens = parse_accession_tokens(&record.accession);
-            if source == "both"
-                && !accession_tokens.is_empty()
-                && accession_tokens
-                    .iter()
-                    .any(|token| ncbi_accessions.contains(token))
-            {
-                source_merge_rows.push(EmittedRecord {
-                    acc_id: format!("BOLD_{}", sanitize_header(&record.source_record_id)),
-                    accession: record.accession.clone(),
-                    organism_name: record.taxon_name.clone(),
-                    header: String::new(),
-                    source: "bold".to_string(),
-                    source_record_id: record.source_record_id.clone(),
-                    processid: record.processid.clone(),
-                    sampleid: record.sampleid.clone(),
-                    marker_key: record.marker_key.clone(),
-                    linked_to_ncbi: true,
-                    emitted_to_fasta: false,
-                    skip_reason: "linked_by_insdcacs".to_string(),
-                });
-                continue;
+                bold_records.extend(rows);
             }
-            emit_bold_record(
-                &record,
-                &mut out,
-                &mut emitted_records,
-                &mut source_merge_rows,
-                &mut counters,
-            )?;
+            bold_records.sort_by(|left, right| {
+                left.taxon_name
+                    .cmp(&right.taxon_name)
+                    .then(left.marker_key.cmp(&right.marker_key))
+                    .then(left.source_record_id.cmp(&right.source_record_id))
+            });
+
+            let ncbi_accessions = acc_to_seqs.keys().cloned().collect::<HashSet<_>>();
+            for record in bold_records {
+                let accession_tokens = parse_accession_tokens(&record.accession);
+                if source == "both"
+                    && !accession_tokens.is_empty()
+                    && accession_tokens
+                        .iter()
+                        .any(|token| ncbi_accessions.contains(token))
+                {
+                    source_merge_rows.push(EmittedRecord {
+                        acc_id: format!("BOLD_{}", sanitize_header(&record.source_record_id)),
+                        accession: record.accession.clone(),
+                        organism_name: record.taxon_name.clone(),
+                        header: String::new(),
+                        source: "bold".to_string(),
+                        source_record_id: record.source_record_id.clone(),
+                        processid: record.processid.clone(),
+                        sampleid: record.sampleid.clone(),
+                        marker_key: record.marker_key.clone(),
+                        linked_to_ncbi: true,
+                        emitted_to_fasta: false,
+                        skip_reason: "linked_by_insdcacs".to_string(),
+                    });
+                    continue;
+                }
+                emit_bold_record(
+                    &record,
+                    &mut out,
+                    &mut emitted_records,
+                    &mut source_merge_rows,
+                    &mut counters,
+                )?;
+            }
+        }
+
+        write_acc_organism_csv(&params.output_file, &emitted_records)?;
+        let source_merge_path = write_source_merge_csv(&params.output_file, &source_merge_rows)?;
+        append_log_line(
+            log_path,
+            &format!("# source_merge_csv: {}", source_merge_path.display()),
+        )?;
+        append_log_line(
+            log_path,
+            &format!("# total records: {}", counters.total_records),
+        )?;
+        append_log_line(
+            log_path,
+            &format!("# matched records: {}", counters.matched_records),
+        )?;
+        append_log_line(
+            log_path,
+            &format!("# matched features: {}", counters.matched_features),
+        )?;
+        append_log_line(
+            log_path,
+            &format!("# kept records: {}", counters.kept_records),
+        )?;
+        append_log_line(
+            log_path,
+            &format!(
+                "# skipped duplicates (same accession+sequence): {}",
+                counters.skipped_same
+            ),
+        )?;
+        append_log_line(
+            log_path,
+            &format!(
+                "# kept duplicates (same accession, different sequence): {}",
+                counters.duplicated_diff
+            ),
+        )?;
+        if !dup_accessions.is_empty() {
+            append_log_line(log_path, "# duplicate accessions with different sequences:")?;
+            let mut rows = dup_accessions.into_iter().collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.0.cmp(&b.0));
+            for (acc, cnt) in rows {
+                append_log_line(log_path, &format!("# - {acc}: {cnt} sequences"))?;
+            }
+        }
+        append_log_line(
+            log_path,
+            &format!("# output: {}", params.output_file.display()),
+        )?;
+        Ok(())
+    })();
+
+    let finished_at = log_timestamp_now();
+    let elapsed_sec = started_clock.elapsed().as_secs_f64();
+    match &run_result {
+        Ok(()) => {
+            let _ = append_log_line(log_path, "# status: ok");
+        }
+        Err(err) => {
+            let _ = append_log_line(log_path, "# status: error");
+            let _ = append_error_log_line(log_path, &format!("# error: {err}"));
         }
     }
+    let _ = append_log_line(log_path, &format!("# finished_at: {finished_at}"));
+    let _ = append_log_line(log_path, &format!("# elapsed_sec: {elapsed_sec:.3}"));
 
-    write_acc_organism_csv(&params.output_file, &emitted_records)?;
-    let source_merge_path = write_source_merge_csv(&params.output_file, &source_merge_rows)?;
-    append_log_line(
-        log_path,
-        &format!("# source_merge_csv: {}", source_merge_path.display()),
-    )?;
-    append_log_line(
-        log_path,
-        &format!("# total records: {}", counters.total_records),
-    )?;
-    append_log_line(
-        log_path,
-        &format!("# matched records: {}", counters.matched_records),
-    )?;
-    append_log_line(
-        log_path,
-        &format!("# matched features: {}", counters.matched_features),
-    )?;
-    append_log_line(
-        log_path,
-        &format!("# kept records: {}", counters.kept_records),
-    )?;
-    append_log_line(
-        log_path,
-        &format!(
-            "# skipped duplicates (same accession+sequence): {}",
-            counters.skipped_same
-        ),
-    )?;
-    append_log_line(
-        log_path,
-        &format!(
-            "# kept duplicates (same accession, different sequence): {}",
-            counters.duplicated_diff
-        ),
-    )?;
-    if !dup_accessions.is_empty() {
-        append_log_line(log_path, "# duplicate accessions with different sequences:")?;
-        let mut rows = dup_accessions.into_iter().collect::<Vec<_>>();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        for (acc, cnt) in rows {
-            append_log_line(log_path, &format!("# - {acc}: {cnt} sequences"))?;
-        }
-    }
-    append_log_line(
-        log_path,
-        &format!("# output: {}", params.output_file.display()),
-    )?;
-    append_log_line(log_path, "# finished: rust-runner")?;
-
-    Ok(())
+    run_result
 }
