@@ -1,6 +1,16 @@
 import "./styles.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  DEFAULTS,
+  parseCommaSeparatedList,
+  parseFloatOrNull,
+  parseIntOrNull,
+  readCheckedValues,
+  setCheckedValues
+} from "./lib/form-utils.js";
+import { createMonitorView } from "./lib/monitor-view.js";
+import { mergeUniqueValues, parseDelimitedTokens, renderTokenPills } from "./lib/token-list.js";
 
 const els = {
   tabSetup: document.querySelector("#tab-setup"),
@@ -44,8 +54,16 @@ const els = {
   flowPostEnable: document.querySelector("#flow-post-enable"),
   flowPostPrimer: document.querySelector("#flow-post-primer"),
   flowPostLength: document.querySelector("#flow-post-length"),
+  outputPrefixInput: document.querySelector("#output-prefix"),
   outputRootInput: document.querySelector("#output-root"),
   emailInput: document.querySelector("#email"),
+  apiKeyInput: document.querySelector("#api-key"),
+  saveApiKeyInput: document.querySelector("#save-api-key"),
+  filterMitoInput: document.querySelector("#f-mito"),
+  filterDdbjInput: document.querySelector("#f-ddbj"),
+  filterBiomolInput: document.querySelector("#f-biomol"),
+  filterLengthMinInput: document.querySelector("#f-length-min"),
+  filterLengthMaxInput: document.querySelector("#f-length-max"),
   postEnableInput: document.querySelector("#post-enable"),
   primerFileInput: document.querySelector("#primer-file"),
   primerSetInput: document.querySelector("#primer-set"),
@@ -60,6 +78,7 @@ const els = {
   ncbiDelaySecInput: document.querySelector("#ncbi-delay-sec"),
   outputDefaultHeaderFormatInput: document.querySelector("#output-default-header-format"),
   outputMifishHeaderFormatInput: document.querySelector("#output-mifish-header-format"),
+  speedInput: document.querySelector("#speed"),
   resumeInput: document.querySelector("#resume"),
   duplicateReportStep: document.querySelector('.post-step[value="duplicate_report"]'),
   loadDbTomlBtn: document.querySelector("#load-db-toml"),
@@ -76,6 +95,18 @@ const state = {
   taxonSearchSeq: 0,
   taxonSearchTimer: null
 };
+
+const postStepEls = Array.from(document.querySelectorAll(".post-step"));
+const monitorView = createMonitorView({
+  statusEl: els.status,
+  phaseEl: els.phase,
+  progressEl: els.progress,
+  progressDetailEl: els.progressDetail,
+  logsEl: els.logs,
+  metricsListEl: els.metricsList,
+  resultFilesEl: els.resultFiles,
+  openPath: (path) => invoke("open_path", { path })
+});
 
 function switchView(name) {
   const map = {
@@ -99,25 +130,8 @@ function setResultsEnabled(enabled) {
   els.tabResults.disabled = !enabled;
 }
 
-function parseIntOrNull(value) {
-  const v = `${value}`.trim();
-  if (!v) return null;
-  const parsed = Number.parseInt(v, 10);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function parseFloatOrNull(value) {
-  const v = `${value}`.trim();
-  if (!v) return null;
-  const parsed = Number.parseFloat(v);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
 function parseTaxidTokens(raw) {
-  return `${raw}`
-    .split(/[\s,;]+/)
-    .map((v) => v.trim())
-    .filter(Boolean);
+  return parseDelimitedTokens(raw);
 }
 
 function currentBuildSource() {
@@ -164,43 +178,24 @@ function syncTaxidsHidden() {
 }
 
 function renderTaxids() {
-  els.taxidList.innerHTML = "";
-  els.taxidList.classList.toggle("empty", state.taxids.length === 0);
-  els.taxidCount.textContent = `${state.taxids.length} taxids`;
-
-  for (const taxid of state.taxids) {
-    const li = document.createElement("li");
-    li.className = "taxid-pill";
-
-    const text = document.createElement("span");
-    text.textContent = taxid;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "taxid-remove";
-    remove.textContent = "×";
-    remove.title = `remove ${taxid}`;
-    remove.addEventListener("click", () => {
-      state.taxids = state.taxids.filter((v) => v !== taxid);
+  renderTokenPills({
+    container: els.taxidList,
+    countLabel: els.taxidCount,
+    items: state.taxids,
+    countSuffix: "taxids",
+    onRemove: (taxid) => {
+      state.taxids = state.taxids.filter((value) => value !== taxid);
       renderTaxids();
       syncTaxidsHidden();
       updateGuidanceState();
-    });
-
-    li.append(text, remove);
-    els.taxidList.appendChild(li);
-  }
+    }
+  });
 }
 
 function addTaxids(raw) {
   const tokens = parseTaxidTokens(raw);
   if (!tokens.length) return;
-
-  const merged = new Set(state.taxids);
-  for (const taxid of tokens) {
-    merged.add(taxid);
-  }
-  state.taxids = Array.from(merged);
+  state.taxids = mergeUniqueValues(state.taxids, tokens);
   renderTaxids();
   syncTaxidsHidden();
 }
@@ -216,8 +211,6 @@ function clearTaxonCandidates() {
 function pickTaxonCandidate(item) {
   if (!item?.taxId) return;
   addTaxids(item.taxId);
-  renderTaxids();
-  syncTaxidsHidden();
   updateGuidanceState();
   els.taxonNameInput.value = `${item.scientificName} : ${item.taxId}`;
   clearTaxonCandidates();
@@ -267,7 +260,7 @@ async function searchTaxonCandidatesNow() {
   } catch (error) {
     if (seq !== state.taxonSearchSeq) return;
     clearTaxonCandidates();
-    appendLog(`[warn] taxon search failed: ${error}`);
+    monitorView.appendLog(`[warn] taxon search failed: ${error}`);
   }
 }
 
@@ -282,41 +275,22 @@ function scheduleTaxonSearch() {
 }
 
 function renderMarkers() {
-  els.markerList.innerHTML = "";
-  els.markerList.classList.toggle("empty", state.markers.length === 0);
-  els.markerCount.textContent = `${state.markers.length} markers`;
-
-  for (const marker of state.markers) {
-    const li = document.createElement("li");
-    li.className = "taxid-pill marker-pill";
-
-    const text = document.createElement("span");
-    text.textContent = marker;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "taxid-remove";
-    remove.textContent = "×";
-    remove.title = `remove ${marker}`;
-    remove.addEventListener("click", () => {
-      state.markers = state.markers.filter((v) => v !== marker);
+  renderTokenPills({
+    container: els.markerList,
+    countLabel: els.markerCount,
+    items: state.markers,
+    countSuffix: "markers",
+    pillClass: "taxid-pill marker-pill",
+    onRemove: (marker) => {
+      state.markers = state.markers.filter((value) => value !== marker);
       renderMarkers();
       updateGuidanceState();
-    });
-
-    li.append(text, remove);
-    els.markerList.appendChild(li);
-  }
+    }
+  });
 }
 
 function addMarkers(values) {
-  const arr = Array.isArray(values) ? values : [values];
-  const merged = new Set(state.markers);
-  for (const raw of arr) {
-    const marker = `${raw}`.trim();
-    if (marker) merged.add(marker);
-  }
-  state.markers = Array.from(merged);
+  state.markers = mergeUniqueValues(state.markers, values);
   renderMarkers();
 }
 
@@ -335,47 +309,45 @@ function setFlowItemNeutral(el) {
 }
 
 function setPostPrepStepSelection(steps) {
-  const wanted = new Set(Array.isArray(steps) ? steps : []);
-  Array.from(document.querySelectorAll(".post-step")).forEach((el) => {
-    el.checked = wanted.has(el.value);
-  });
+  setCheckedValues(postStepEls, steps);
 }
 
 function applyImportedDbToml(imported) {
   els.sourceInput.value = imported.source || "ncbi";
-  document.querySelector("#email").value = imported.email || "";
+  els.emailInput.value = imported.email || "";
 
   const apiKey = imported.apiKey || "";
-  document.querySelector("#api-key").value = apiKey;
-  document.querySelector("#save-api-key").checked = apiKey.length > 0;
+  els.apiKeyInput.value = apiKey;
+  els.saveApiKeyInput.checked = apiKey.length > 0;
 
   const filters = imported.filters || {};
-  document.querySelector("#f-mito").checked = Boolean(filters.mitochondrion);
-  document.querySelector("#f-ddbj").checked = Boolean(filters.ddbjEmblGenbank);
-  document.querySelector("#f-biomol").checked = Boolean(filters.biomolGenomic);
-  document.querySelector("#f-length-min").value = filters.lengthMin ?? "";
-  document.querySelector("#f-length-max").value = filters.lengthMax ?? "";
+  els.filterMitoInput.checked = Boolean(filters.mitochondrion);
+  els.filterDdbjInput.checked = Boolean(filters.ddbjEmblGenbank);
+  els.filterBiomolInput.checked = Boolean(filters.biomolGenomic);
+  els.filterLengthMinInput.value = filters.lengthMin ?? "";
+  els.filterLengthMaxInput.value = filters.lengthMax ?? "";
 
   const postPrep = imported.postPrep || {};
-  document.querySelector("#post-enable").checked = Boolean(postPrep.enable);
-  document.querySelector("#primer-file").value = postPrep.primerFile || "";
-  document.querySelector("#primer-set").value = (postPrep.primerSet || []).join(",");
-  document.querySelector("#post-length-min").value = postPrep.sequenceLengthMin ?? "";
-  document.querySelector("#post-length-max").value = postPrep.sequenceLengthMax ?? "";
+  els.postEnableInput.checked = Boolean(postPrep.enable);
+  els.primerFileInput.value = postPrep.primerFile || "";
+  els.primerSetInput.value = (postPrep.primerSet || []).join(",");
+  els.postLengthMinInput.value = postPrep.sequenceLengthMin ?? "";
+  els.postLengthMaxInput.value = postPrep.sequenceLengthMax ?? "";
   setPostPrepStepSelection(postPrep.steps || []);
 
   const ncbiOptions = imported.ncbiOptions || {};
-  els.ncbiDbInput.value = ncbiOptions.db || "nucleotide";
-  els.ncbiRettypeInput.value = ncbiOptions.rettype || "gb";
-  els.ncbiRetmodeInput.value = ncbiOptions.retmode || "text";
-  els.ncbiPerQueryInput.value = ncbiOptions.perQuery || 100;
+  els.ncbiDbInput.value = ncbiOptions.db || DEFAULTS.ncbiDb;
+  els.ncbiRettypeInput.value = ncbiOptions.rettype || DEFAULTS.ncbiRettype;
+  els.ncbiRetmodeInput.value = ncbiOptions.retmode || DEFAULTS.ncbiRetmode;
+  els.ncbiPerQueryInput.value = ncbiOptions.perQuery || DEFAULTS.ncbiPerQuery;
   els.ncbiUseHistoryInput.checked = ncbiOptions.useHistory !== false;
   els.ncbiDelaySecInput.value = ncbiOptions.delaySec ?? "";
 
   const outputOptions = imported.outputOptions || {};
   els.outputDefaultHeaderFormatInput.value =
-    outputOptions.defaultHeaderFormat || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}";
-  els.outputMifishHeaderFormatInput.value = outputOptions.mifishHeaderFormat || "{db}|{acc_id}|{organism}";
+    outputOptions.defaultHeaderFormat || DEFAULTS.defaultHeaderFormat;
+  els.outputMifishHeaderFormatInput.value =
+    outputOptions.mifishHeaderFormat || DEFAULTS.mifishHeaderFormat;
   syncSourceMode();
 }
 
@@ -390,7 +362,7 @@ function isReadyToRun() {
 
 function updatePostPrepGuidance() {
   const postEnabled = els.postEnableInput.checked;
-  const selectedSteps = new Set(Array.from(document.querySelectorAll(".post-step:checked")).map((v) => v.value));
+  const selectedSteps = new Set(getSelectedPostPrepSteps());
 
   if (!postEnabled) {
     setFlowItemNeutral(els.flowPostEnable);
@@ -403,10 +375,7 @@ function updatePostPrepGuidance() {
 
   if (selectedSteps.has("primer_trim")) {
     const hasPrimerFile = els.primerFileInput.value.trim().length > 0;
-    const hasPrimerSet = els.primerSetInput.value
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean).length > 0;
+    const hasPrimerSet = parseCommaSeparatedList(els.primerSetInput.value).length > 0;
     setFlowItemState(els.flowPostPrimer, hasPrimerFile && hasPrimerSet);
   } else {
     setFlowItemNeutral(els.flowPostPrimer);
@@ -429,203 +398,53 @@ function updateGuidanceState() {
   els.run.disabled = !isReadyToRun();
 }
 
+function getSelectedPostPrepSteps() {
+  return readCheckedValues(postStepEls);
+}
+
 function collectRequest() {
-  const steps = Array.from(document.querySelectorAll(".post-step:checked")).map((v) => v.value);
-  const primerSet = document
-    .querySelector("#primer-set")
-    .value.split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
+  const steps = getSelectedPostPrepSteps();
+  const primerSet = parseCommaSeparatedList(els.primerSetInput.value);
 
   return {
     taxids: [...state.taxids],
     markers: [...state.markers],
     source: currentBuildSource(),
-    outputPrefix: document.querySelector("#output-prefix").value.trim() || "MiFish",
-    outputRoot: document.querySelector("#output-root").value.trim(),
-    email: document.querySelector("#email").value.trim(),
-    apiKey: document.querySelector("#api-key").value.trim(),
-    saveApiKey: document.querySelector("#save-api-key").checked,
+    outputPrefix: els.outputPrefixInput.value.trim() || DEFAULTS.outputPrefix,
+    outputRoot: els.outputRootInput.value.trim(),
+    email: els.emailInput.value.trim(),
+    apiKey: els.apiKeyInput.value.trim(),
+    saveApiKey: els.saveApiKeyInput.checked,
     filters: {
-      mitochondrion: document.querySelector("#f-mito").checked,
-      ddbjEmblGenbank: document.querySelector("#f-ddbj").checked,
-      biomolGenomic: document.querySelector("#f-biomol").checked,
-      lengthMin: parseIntOrNull(document.querySelector("#f-length-min").value),
-      lengthMax: parseIntOrNull(document.querySelector("#f-length-max").value)
+      mitochondrion: els.filterMitoInput.checked,
+      ddbjEmblGenbank: els.filterDdbjInput.checked,
+      biomolGenomic: els.filterBiomolInput.checked,
+      lengthMin: parseIntOrNull(els.filterLengthMinInput.value),
+      lengthMax: parseIntOrNull(els.filterLengthMaxInput.value)
     },
     postPrep: {
-      enable: document.querySelector("#post-enable").checked,
-      primerFile: document.querySelector("#primer-file").value.trim(),
+      enable: els.postEnableInput.checked,
+      primerFile: els.primerFileInput.value.trim(),
       primerSet,
       steps,
-      sequenceLengthMin: parseIntOrNull(document.querySelector("#post-length-min").value),
-      sequenceLengthMax: parseIntOrNull(document.querySelector("#post-length-max").value)
+      sequenceLengthMin: parseIntOrNull(els.postLengthMinInput.value),
+      sequenceLengthMax: parseIntOrNull(els.postLengthMaxInput.value)
     },
     ncbiOptions: {
-      db: els.ncbiDbInput.value.trim() || "nucleotide",
-      rettype: els.ncbiRettypeInput.value.trim() || "gb",
-      retmode: els.ncbiRetmodeInput.value.trim() || "text",
-      perQuery: Math.max(1, Number.parseInt(els.ncbiPerQueryInput.value, 10) || 100),
+      db: els.ncbiDbInput.value.trim() || DEFAULTS.ncbiDb,
+      rettype: els.ncbiRettypeInput.value.trim() || DEFAULTS.ncbiRettype,
+      retmode: els.ncbiRetmodeInput.value.trim() || DEFAULTS.ncbiRetmode,
+      perQuery: Math.max(1, Number.parseInt(els.ncbiPerQueryInput.value, 10) || DEFAULTS.ncbiPerQuery),
       useHistory: els.ncbiUseHistoryInput.checked,
       delaySec: parseFloatOrNull(els.ncbiDelaySecInput.value)
     },
     outputOptions: {
-      defaultHeaderFormat:
-        els.outputDefaultHeaderFormatInput.value.trim() || "{acc_id}|{organism}|{marker}|{label}|{type}|{loc}|{strand}",
-      mifishHeaderFormat: els.outputMifishHeaderFormatInput.value.trim() || "{db}|{acc_id}|{organism}"
+      defaultHeaderFormat: els.outputDefaultHeaderFormatInput.value.trim() || DEFAULTS.defaultHeaderFormat,
+      mifishHeaderFormat: els.outputMifishHeaderFormatInput.value.trim() || DEFAULTS.mifishHeaderFormat
     },
-    workers: Number.parseInt(document.querySelector("#speed").value, 10),
-    resume: document.querySelector("#resume").checked
+    workers: Number.parseInt(els.speedInput.value, 10),
+    resume: els.resumeInput.checked
   };
-}
-
-function resetMonitor() {
-  els.status.textContent = "Idle";
-  els.phase.textContent = "-";
-  els.progress.value = 0;
-  els.progressDetail.textContent = "0.0%";
-  els.logs.textContent = "";
-  els.metricsList.innerHTML = "";
-}
-
-function appendLog(line) {
-  const current = els.logs.textContent;
-  const next = current.length > 50000 ? current.slice(-30000) : current;
-  els.logs.textContent = `${next}${line}\n`;
-  els.logs.scrollTop = els.logs.scrollHeight;
-}
-
-function renderMetrics(metrics) {
-  const items = [];
-  const queryCountByTaxid = metrics?.queryCountByTaxid || {};
-  const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
-  const boldSpecimenCountByTaxon = metrics?.boldSpecimenCountByTaxon || {};
-  const boldDownloadedByTaxon = metrics?.boldDownloadedByTaxon || {};
-  const boldMatchedByTaxon = metrics?.boldMatchedByTaxon || {};
-  const allTaxids = new Set([...Object.keys(queryCountByTaxid), ...Object.keys(fetchCountByTaxid)]);
-  for (const taxid of Array.from(allTaxids).sort()) {
-    if (queryCountByTaxid[taxid] != null) {
-      const count = queryCountByTaxid[taxid];
-      items.push(`query count taxid=${taxid}: ${count}`);
-    }
-    if (fetchCountByTaxid[taxid] != null) {
-      const fetched = fetchCountByTaxid[taxid];
-      const total = queryCountByTaxid[taxid];
-      if (total != null) {
-        items.push(`fetch progress taxid=${taxid}: ${Math.min(fetched, total)}/${total}`);
-      } else {
-        items.push(`fetch progress taxid=${taxid}: ${fetched}`);
-      }
-    }
-  }
-  const allBoldTaxa = new Set([
-    ...Object.keys(boldSpecimenCountByTaxon),
-    ...Object.keys(boldDownloadedByTaxon),
-    ...Object.keys(boldMatchedByTaxon)
-  ]);
-  for (const taxon of Array.from(allBoldTaxa).sort()) {
-    const specimens = boldSpecimenCountByTaxon[taxon];
-    const downloaded = boldDownloadedByTaxon[taxon];
-    const matched = boldMatchedByTaxon[taxon];
-    const parts = [];
-    if (specimens != null) parts.push(`specimens=${specimens}`);
-    if (downloaded != null) parts.push(`downloaded=${downloaded}`);
-    if (matched != null) parts.push(`matched=${matched}`);
-    if (parts.length) {
-      items.push(`bold taxon=${taxon}: ${parts.join(" ")}`);
-    }
-  }
-  if (metrics?.matchedRecords != null) items.push(`matched records: ${metrics.matchedRecords}`);
-  if (metrics?.keptRecordsBeforePostPrep != null) {
-    items.push(`kept before post_prep: ${metrics.keptRecordsBeforePostPrep}`);
-  }
-  if (metrics?.primerTrimRemoved != null) items.push(`primer_trim removed: ${metrics.primerTrimRemoved}`);
-  if (metrics?.lengthFilterRemoved != null) items.push(`length_filter removed: ${metrics.lengthFilterRemoved}`);
-  if (metrics?.duplicateGroups != null) items.push(`duplicate groups: ${metrics.duplicateGroups}`);
-  if (metrics?.crossOrganismGroups != null) {
-    items.push(`cross_organism_groups: ${metrics.crossOrganismGroups}`);
-  }
-
-  els.metricsList.innerHTML = "";
-  for (const text of items) {
-    const li = document.createElement("li");
-    li.textContent = text;
-    els.metricsList.appendChild(li);
-  }
-}
-
-function renderProgressDetail(phase, percent, metrics) {
-  const safePercent = typeof percent === "number" ? Math.max(0, Math.min(percent, 100)) : null;
-  const parts = [];
-
-  const queryCountByTaxid = metrics?.queryCountByTaxid || {};
-  const fetchCountByTaxid = metrics?.fetchCountByTaxid || {};
-  const boldSpecimenCountByTaxon = metrics?.boldSpecimenCountByTaxon || {};
-  const boldDownloadedByTaxon = metrics?.boldDownloadedByTaxon || {};
-  const boldMatchedByTaxon = metrics?.boldMatchedByTaxon || {};
-  const total = Object.values(queryCountByTaxid).reduce((acc, v) => acc + (Number(v) || 0), 0);
-  if (total > 0) {
-    const fetched = Object.entries(fetchCountByTaxid).reduce((acc, [taxid, raw]) => {
-      const done = Number(raw) || 0;
-      const max = Number(queryCountByTaxid[taxid]) || done;
-      return acc + Math.min(done, max);
-    }, 0);
-    const fetchRatio = (Math.min(fetched, total) / total) * 100;
-    parts.push(`fetch ${Math.min(fetched, total)}/${total} (${fetchRatio.toFixed(1)}%)`);
-  }
-
-  const boldDownloadedTotal = Object.values(boldDownloadedByTaxon).reduce(
-    (acc, v) => acc + (Number(v) || 0),
-    0
-  );
-  const boldMatchedTotal = Object.values(boldMatchedByTaxon).reduce(
-    (acc, v) => acc + (Number(v) || 0),
-    0
-  );
-  const boldSpecimenTotal = Object.values(boldSpecimenCountByTaxon).reduce(
-    (acc, v) => acc + (Number(v) || 0),
-    0
-  );
-  if (boldDownloadedTotal > 0 || boldSpecimenTotal > 0) {
-    const boldTaxonCount = new Set([
-      ...Object.keys(boldSpecimenCountByTaxon),
-      ...Object.keys(boldDownloadedByTaxon),
-      ...Object.keys(boldMatchedByTaxon)
-    ]).size;
-    let boldDetail = `bold matched ${boldMatchedTotal}/${boldDownloadedTotal || 0}`;
-    if (boldSpecimenTotal > 0) {
-      boldDetail += ` specimens ${boldSpecimenTotal}`;
-    }
-    if (boldTaxonCount > 0) {
-      boldDetail += ` taxa ${boldTaxonCount}`;
-    }
-    parts.push(boldDetail);
-  }
-
-  if (safePercent != null && (!phase || phase !== "Fetch/Parse")) {
-    parts.push(`total ${safePercent.toFixed(1)}%`);
-  }
-
-  els.progressDetail.textContent = parts.length ? parts.join(" | ") : safePercent != null ? `${safePercent.toFixed(1)}%` : "-";
-}
-
-function renderResultFiles(files) {
-  els.resultFiles.innerHTML = "";
-  for (const path of files) {
-    const li = document.createElement("li");
-    const row = document.createElement("div");
-    row.className = "file-row";
-    const text = document.createElement("code");
-    text.textContent = path;
-    const button = document.createElement("button");
-    button.textContent = "Open";
-    button.addEventListener("click", async () => {
-      await invoke("open_path", { path });
-    });
-    row.append(text, button);
-    li.appendChild(row);
-    els.resultFiles.appendChild(li);
-  }
 }
 
 async function setupEventListener() {
@@ -639,7 +458,7 @@ async function setupEventListener() {
     if (!payload || typeof payload !== "object") return;
 
     if (payload.eventType === "log" && payload.line) {
-      appendLog(payload.line);
+      monitorView.appendLog(payload.line);
     }
     if (payload.eventType === "status" && payload.status) {
       els.status.textContent = payload.status;
@@ -647,18 +466,18 @@ async function setupEventListener() {
     if (payload.eventType === "progress") {
       if (payload.phase) els.phase.textContent = payload.phase;
       if (payload.percent != null) els.progress.value = payload.percent;
-      renderProgressDetail(payload.phase, payload.percent, payload.metrics);
-      if (payload.metrics) renderMetrics(payload.metrics);
+      monitorView.renderProgressDetail(payload.phase, payload.percent, payload.metrics);
+      if (payload.metrics) monitorView.renderMetrics(payload.metrics);
     }
     if (payload.eventType === "result") {
       state.jobDir = payload.jobDir || "";
       state.files = payload.files || [];
       setResultsEnabled(true);
-      renderResultFiles(state.files);
+      monitorView.renderResultFiles(state.files);
       switchView("results");
     }
     if (payload.eventType === "error" && payload.message) {
-      appendLog(`[error] ${payload.message}`);
+      monitorView.appendLog(`[error] ${payload.message}`);
       els.status.textContent = "Failed";
     }
   });
@@ -668,22 +487,22 @@ async function loadSavedConfig() {
   try {
     const saved = await invoke("load_gui_config");
     if (!saved) return;
-    document.querySelector("#output-root").value = saved.outputRoot || "";
-    document.querySelector("#output-prefix").value = saved.outputPrefix || "MiFish";
-    document.querySelector("#email").value = saved.email || "";
-    document.querySelector("#api-key").value = saved.saveApiKey ? saved.apiKey || "" : "";
-    document.querySelector("#save-api-key").checked = Boolean(saved.saveApiKey);
+    els.outputRootInput.value = saved.outputRoot || "";
+    els.outputPrefixInput.value = saved.outputPrefix || DEFAULTS.outputPrefix;
+    els.emailInput.value = saved.email || "";
+    els.apiKeyInput.value = saved.saveApiKey ? saved.apiKey || "" : "";
+    els.saveApiKeyInput.checked = Boolean(saved.saveApiKey);
     if (saved.marker) {
-      document.querySelector("#marker").value = saved.marker;
+      els.markerSelect.value = saved.marker;
       addMarkers(saved.marker);
     } else if (!state.markers.length) {
-      addMarkers(document.querySelector("#marker").value);
+      addMarkers(els.markerSelect.value);
     }
     if (saved.source) {
       els.sourceInput.value = saved.source;
       syncSourceMode();
     }
-    if (saved.workers) document.querySelector("#speed").value = `${saved.workers}`;
+    if (saved.workers) els.speedInput.value = `${saved.workers}`;
     if (saved.ncbiDb) els.ncbiDbInput.value = saved.ncbiDb;
     if (saved.ncbiRettype) els.ncbiRettypeInput.value = saved.ncbiRettype;
     if (saved.ncbiRetmode) els.ncbiRetmodeInput.value = saved.ncbiRetmode;
@@ -698,7 +517,7 @@ async function loadSavedConfig() {
     }
     updateGuidanceState();
   } catch (error) {
-    appendLog(`[warn] load config failed: ${error}`);
+    monitorView.appendLog(`[warn] load config failed: ${error}`);
   }
 }
 
@@ -710,14 +529,14 @@ async function runJob() {
   if (sourceUsesNcbi() && !req.email) throw new Error("email is required for ncbi/both");
 
   await setupEventListener();
-  resetMonitor();
+  monitorView.reset();
   setMonitorEnabled(true);
   setResultsEnabled(false);
   switchView("monitor");
 
   const resp = await invoke("start_run", { req });
-  appendLog(`job dir: ${resp.jobDir}`);
-  appendLog(`log path: ${resp.logPath}`);
+  monitorView.appendLog(`job dir: ${resp.jobDir}`);
+  monitorView.appendLog(`log path: ${resp.logPath}`);
 }
 
 function resetForm() {
@@ -729,13 +548,14 @@ function resetForm() {
   clearTaxonCandidates();
   state.markers = [];
   addMarkers(els.markerSelect.value);
-  document.querySelector("#f-length-min").value = "";
-  document.querySelector("#f-length-max").value = "";
-  document.querySelector("#post-length-min").value = "";
-  document.querySelector("#post-length-max").value = "";
-  document.querySelector("#primer-file").value = "";
-  document.querySelector("#primer-set").value = "";
-  document.querySelector("#post-enable").checked = false;
+  els.filterLengthMinInput.value = "";
+  els.filterLengthMaxInput.value = "";
+  els.postLengthMinInput.value = "";
+  els.postLengthMaxInput.value = "";
+  els.primerFileInput.value = "";
+  els.primerSetInput.value = "";
+  els.postEnableInput.checked = false;
+  setPostPrepStepSelection([]);
   syncSourceMode();
   updateGuidanceState();
 }
@@ -745,7 +565,7 @@ els.form.addEventListener("submit", async (event) => {
   try {
     await runJob();
   } catch (error) {
-    appendLog(`[error] ${error}`);
+    monitorView.appendLog(`[error] ${error}`);
   }
 });
 
@@ -757,14 +577,14 @@ els.cancel.addEventListener("click", async () => {
   try {
     await invoke("cancel_run");
   } catch (error) {
-    appendLog(`[error] cancel failed: ${error}`);
+    monitorView.appendLog(`[error] cancel failed: ${error}`);
   }
 });
 
 els.pickOutput.addEventListener("click", async () => {
   const selected = await invoke("choose_output_directory");
   if (selected) {
-    document.querySelector("#output-root").value = selected;
+    els.outputRootInput.value = selected;
     updateGuidanceState();
   }
 });
@@ -772,7 +592,7 @@ els.pickOutput.addEventListener("click", async () => {
 els.pickPrimer.addEventListener("click", async () => {
   const selected = await invoke("choose_primer_file");
   if (selected) {
-    document.querySelector("#primer-file").value = selected;
+    els.primerFileInput.value = selected;
     updateGuidanceState();
   }
 });
@@ -786,7 +606,7 @@ els.loadDbTomlBtn.addEventListener("click", async () => {
     els.loadedDbTomlPath.textContent = imported.sourcePath || selectedPath;
     updateGuidanceState();
   } catch (error) {
-    appendLog(`[error] db.toml import failed: ${error}`);
+    monitorView.appendLog(`[error] db.toml import failed: ${error}`);
   }
 });
 
@@ -851,7 +671,7 @@ els.primerFileInput.addEventListener("input", updateGuidanceState);
 els.primerSetInput.addEventListener("input", updateGuidanceState);
 els.postLengthMinInput.addEventListener("input", updateGuidanceState);
 els.postLengthMaxInput.addEventListener("input", updateGuidanceState);
-Array.from(document.querySelectorAll(".post-step")).forEach((el) => {
+postStepEls.forEach((el) => {
   el.addEventListener("change", updateGuidanceState);
 });
 
